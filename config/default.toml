@@ -66,8 +66,11 @@ capture_dir   = "C:\\ADAM\\telemetry"
 # copy for verify_tools() reporting and MUST be kept consistent with it
 # by whoever provisions the guest image.
 [http_guest]
-# Canonical guest IP on Host-Only Adapter #2 (192.168.19.x subnet)
-host = "192.168.19.102"
+# PLACEHOLDER -- 127.0.0.1 is not a real guest address. Override in
+# config/<ADAM_ENV>.toml with the guest's actual host-only-adapter IP
+# (the same address wait_for_guest_ready's own guest-reachability checks
+# resolve) before ever setting guest_backend = "http".
+host = "192.168.56.103"
 port = 8765
 request_timeout_s = 15.0
 procmon_path  = "C:\\Users\\Admin\\Downloads\\ProcessMonitor\\Procmon64.exe"

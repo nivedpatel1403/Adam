@@ -1,9 +1,15 @@
 # Python
 __pycache__/
 *.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+build/
+dist/
 .venv/
 venv/
-*.egg-info/
+env/
+ENV/
 
 # Tooling
 .pytest_cache/
@@ -12,14 +18,21 @@ venv/
 .coverage
 htmlcov/
 
-# Editors
+# Editors & OS
 .idea/
 .vscode/
 *.swp
+*.swo
+*~
 .DS_Store
+Thumbs.db
+Desktop.ini
+ehthumbs.db
 
 # Local config / secrets
 .env
+.env.*
+!.env.example
 config/development.toml
 config/production.toml
 
