@@ -353,7 +353,7 @@ async def execute_live_session(sample_input, profile_name, deception_enabled, st
     session = await runner.run(
         host_sample_path,
         vm_profile=profile_name,
-        headless=True,
+        headless=False,
     )
     
     return session.session_id, session

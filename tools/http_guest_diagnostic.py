@@ -689,7 +689,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument("--base-url", default="http://192.168.56.103:8765", help="Guest agent base URL")
+    parser.add_argument("--base-url", default="http://192.168.19.102:8765", help="Guest agent base URL")
     parser.add_argument("--timeout", type=float, default=15.0, help="Per-request HTTP timeout (seconds)")
     parser.add_argument("--capture-dir", default="C:\\ADAM\\diagnostic", help="Guest-side capture directory")
     parser.add_argument(
