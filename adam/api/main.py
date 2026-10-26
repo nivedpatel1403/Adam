@@ -206,12 +206,16 @@ async def run_deterministic_simulation(session_id: str, seed: int):
             payload=raw_event
         )
         await deps.bus.publish(env)
-        await asyncio.sleep(0.01) # space out events
+        await asyncio.sleep(0.005) # space out events
                 
+    # Allow bus consumer tasks to finish processing
+    await asyncio.sleep(0.1)
+
     # Mark as completed
     metadata.status = SessionStatus.COMPLETED
     metadata.ended_at = datetime.now(timezone.utc)
     await deps.session_repo.update(metadata)
+    await deps.db_conn.commit()
     
     await deps.bus.publish(Envelope[dict](
         envelope_version="1.0",
@@ -277,6 +281,7 @@ async def simulate_session(
     
     async def create_and_run():
         await deps.session_repo.create(metadata)
+        await deps.db_conn.commit()
         await run_deterministic_simulation(session_id, seed)
 
     background_tasks.add_task(create_and_run)

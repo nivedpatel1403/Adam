@@ -58,6 +58,7 @@ class VMOperationResult:
     stdout: str
     stderr: str
     termination_reason: str | None = None
+    pid: int | None = None
 
 
 @dataclass(frozen=True, slots=True)

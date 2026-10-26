@@ -169,6 +169,8 @@ class Runner:
             logger.info(
                 "guest_backend=http -- using HTTPGuestChannel against %s", http_settings.base_url
             )
+            from adam.sandbox.network.interceptor import NetworkInterceptor
+            interceptor = NetworkInterceptor()
             return HTTPGuestChannel(
                 http_settings.base_url,
                 capture_dir=http_settings.capture_dir,
@@ -186,6 +188,7 @@ class Runner:
                 # readiness poll shares one timeout budget concept with
                 # the VM-level one it always runs after.
                 guest_ready_timeout_s=settings.sandbox.guest_ready_timeout_s,
+                network_interceptor=interceptor,
             )
 
         logger.info("guest_backend=vbox -- using VBoxGuestChannel (compatibility backend)")
@@ -302,6 +305,7 @@ class Runner:
         try:
             db_conn = await aiosqlite.connect(settings.db.path)
             await db_conn.execute("PRAGMA journal_mode=WAL;")
+            await db_conn.execute("PRAGMA synchronous=NORMAL;")
             await db_conn.execute("PRAGMA busy_timeout=5000;")
             session_repo = SQLiteSessionRepository(db_conn)
             db_writer = DBWriter(
@@ -337,7 +341,7 @@ class Runner:
 
         orchestrator = SessionOrchestrator(
             controller, bus, collectors, artifacts_dir=artifacts_dir, guest_agent=guest_channel,
-            guest_target_path_template="C:\\ADAM\\{filename}",
+            guest_target_path_template="C:\\ADAM\\samples\\{filename}",
             bus_drain_timeout=120.0,
         )
 

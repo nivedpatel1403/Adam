@@ -140,6 +140,7 @@ via a real stream redirect, not shell syntax.
 |---|---|---|---|
 | POST | `/sysmon/export` | `{"channel": str, "output_path": str}` | `{"output_path": str, "mechanism": "wevtutil" \| "raw_copy"}` |
 | GET | `/sysmon/diagnostics?channel=` | — | `{"channel_available": bool, "event_count": int\|null}` |
+| GET | `/sysmon/events/since?record_id=&event_ids=&channel=` | — | `{"last_record_id": int, "events": list}` |
 
 `/sysmon/export` tries `wevtutil.exe epl` first; on `ACCESS_DENIED` it automatically falls back
 to a raw copy of the channel's backing `.evtx` file (the same two-mechanism strategy

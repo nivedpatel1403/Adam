@@ -82,8 +82,12 @@ from adam.sandbox.guest.http_models import (
     NetworkInterfacesData,
     NetworkStartRequest,
     NetworkStopRequest,
+    ProcessInfo,
+    ProcessQueryData,
     ProcessStartData,
     ProcessStartRequest,
+    ProcessTerminateData,
+    ProcessTerminateRequest,
     ProcmonExportRequest,
     ProcmonStartRequest,
     ProcmonStopRequest,
@@ -93,8 +97,10 @@ from adam.sandbox.guest.http_models import (
     SampleUploadData,
     SampleUploadRequest,
     SysmonDiagnosticsData,
+    SysmonEventsSinceData,
     SysmonExportData,
     SysmonExportRequest,
+    SysmonRecordItem,
     TokenData,
     VersionData,
 )
@@ -149,6 +155,7 @@ class HTTPGuestChannel:
         guest_ready_timeout_s: float = 150.0,
         readiness_poll_interval_s: float = 1.0,
         client: httpx.AsyncClient | None = None,
+        network_interceptor: Any | None = None,
     ) -> None:
         """
         base_url: e.g. "http://192.168.56.101:8765" -- the guest's
@@ -199,8 +206,15 @@ class HTTPGuestChannel:
         self._ready = False
         self._retry_count = 0
         self._mutation_lock = asyncio.Lock()
+        self._network_interceptor = network_interceptor
+        self._tool_availability: ToolAvailability | None = None
         headers = {"X-Adam-Token": auth_token} if auth_token else {}
         self._client = client or httpx.AsyncClient(base_url=self._base_url, timeout=request_timeout_s, headers=headers)
+
+    @property
+    def tool_availability(self) -> ToolAvailability | None:
+        """Cached tool availability determined during verify_tools()."""
+        return self._tool_availability
 
     @property
     def retry_count(self) -> int:
@@ -372,30 +386,17 @@ class HTTPGuestChannel:
         the explicit "1 second interval" requirement. The outer
         `wait_until_ready()` loop IS this method's retry strategy.
         """
+        headers = {"X-Adam-Token": self._auth_token} if self._auth_token else None
+        health_timeout = min(3.0, self._default_timeout)
         try:
-            headers = {"X-Adam-Token": self._auth_token} if self._auth_token else None
-            health_timeout = min(3.0, self._default_timeout)
             response = await self._client.get("/health", headers=headers, timeout=health_timeout)
         except httpx.HTTPError as exc:
-            if "192.168." in str(self._client.base_url) and self._default_timeout > 5.0:
-                for candidate in ["192.168.19.101", "192.168.19.102", "192.168.56.103"]:
-                    if candidate not in str(self._client.base_url):
-                        try:
-                            headers = {"X-Adam-Token": self._auth_token} if self._auth_token else None
-                            port = self._client.base_url.port or 8765
-                            alt_url = f"http://{candidate}:{port}"
-                            async with httpx.AsyncClient(base_url=alt_url, timeout=0.5, headers=headers) as alt_client:
-                                alt_resp = await alt_client.get("/health")
-                                if alt_resp.status_code == 200:
-                                    envelope = ResponseEnvelope.model_validate(alt_resp.json())
-                                    if envelope.success:
-                                        logger.info("[HTTPGuestChannel] Auto-discovered active guest IP: %s", candidate)
-                                        self._base_url = alt_url
-                                        await self._client.aclose()
-                                        self._client = httpx.AsyncClient(base_url=self._base_url, timeout=self._default_timeout, headers=headers)
-                                        return True, "ok"
-                        except Exception:
-                            pass
+            if isinstance(exc, (httpx.ConnectTimeout, httpx.ReadTimeout, httpx.WriteTimeout, httpx.PoolTimeout, httpx.RemoteProtocolError)):
+                try:
+                    await self._client.aclose()
+                    self._client = httpx.AsyncClient(base_url=self._base_url, timeout=self._default_timeout, headers=headers)
+                except Exception:
+                    pass
             return False, f"transport error: {exc}"
 
         if response.status_code != 200:
@@ -458,6 +459,7 @@ class HTTPGuestChannel:
 
         while True:
             attempt += 1
+            self._health_probe_count = attempt
             logger.info("guest_http: Attempt %d", attempt)
 
             healthy, detail = await self._probe_health_once()
@@ -546,12 +548,13 @@ class HTTPGuestChannel:
         for tool, reason in detail.items():
             logger.warning("guest_http: tool unavailable -- %s: %s", tool, reason)
 
-        return ToolAvailability(
+        self._tool_availability = ToolAvailability(
             procmon_available=procmon_available,
             tshark_available=tshark_available,
             sysmon_log_available=sysmon_log_available,
             detail=detail,
         )
+        return self._tool_availability
 
     # ------------------------------------------------------------------ #
     # GuestChannel: start_captures
@@ -575,7 +578,7 @@ class HTTPGuestChannel:
         self._procmon_started = False
         self._tshark_started = False
 
-        if capture_procmon and self._procmon_path is not None:
+        if capture_procmon and self._procmon_path is not None and (self._tool_availability is None or self._tool_availability.procmon_available):
             pml_path = self._guest_path(f"{session_id}_procmon.pml")
             result = await self._request(
                 "POST", "/procmon/start",
@@ -586,7 +589,7 @@ class HTTPGuestChannel:
             if result is not None:
                 self._procmon_started = True
 
-        if capture_network and self._tshark_path is not None:
+        if capture_network and self._tshark_path is not None and (self._tool_availability is None or self._tool_availability.tshark_available):
             interfaces = await self._request("GET", "/network/interfaces", label="start_captures: list interfaces")
             if interfaces is not None:
                 logger.info(
@@ -643,6 +646,34 @@ class HTTPGuestChannel:
         mechanism = SysmonExportData.model_validate(result).mechanism if "mechanism" in result else "unknown"
         logger.info("[HTTPGuestChannel] session=%s sysmon exported via %s", session_id, mechanism)
         return await self._fetch_file(guest_evtx, host_dir / "sysmon.evtx", label=f"session={session_id} sysmon")
+
+    async def get_sysmon_events_since(
+        self,
+        record_id: int = 0,
+        event_ids: str = "1,3",
+        channel: str | None = None,
+    ) -> tuple[int, list[SysmonRecordItem]]:
+        """
+        Polls guest agent GET /sysmon/events/since for Sysmon records with RecordId > record_id.
+        Returns (last_record_id, list_of_records).
+        """
+        params: dict[str, Any] = {"record_id": record_id, "event_ids": event_ids}
+        if channel:
+            params["channel"] = channel
+        result = await self._request(
+            "GET",
+            "/sysmon/events/since",
+            params=params,
+            label="live_poll: sysmon events since",
+        )
+        if result is None:
+            return record_id, []
+        try:
+            data = SysmonEventsSinceData.model_validate(result)
+            return data.last_record_id, data.events
+        except Exception as exc:
+            logger.warning("Failed to validate SysmonEventsSinceData: %s", exc)
+            return record_id, []
 
     async def _export_procmon(self, session_id: str, host_dir: Path) -> str | None:
         if self._procmon_path is None or not getattr(self, "_procmon_started", False):
@@ -837,23 +868,31 @@ class HTTPGuestChannel:
                 raise GuestAgentError(up_env.error_code, up_env.error_message)
             up_data = SampleUploadData.model_validate(up_env.data or {})
 
-            # Stage from the uploaded path
-            stage_req = SampleStageRequest(
-                staged_path=up_data.staged_path,
-                target_path=guest_target_path,
-            )
-            stage_resp = await self._send_with_retry(
-                "POST",
-                "/sample/stage",
-                json_body=stage_req.model_dump(exclude_none=True),
-                timeout=timeout or self._default_timeout,
-                label="stage_sample_fallback",
-            )
-            envelope = ResponseEnvelope.model_validate(stage_resp.json())
-            if not envelope.success:
-                raise GuestAgentError(envelope.error_code, envelope.error_message)
-
-        stage_data = SampleStageData.model_validate(envelope.data or {})
+            if PureWindowsPath(up_data.staged_path) == PureWindowsPath(guest_target_path):
+                stage_data = SampleStageData(
+                    target_path=guest_target_path,
+                    sha256=expected_sha256,
+                    size_bytes=len(data),
+                )
+            else:
+                # Stage from the uploaded path
+                stage_req = SampleStageRequest(
+                    staged_path=up_data.staged_path,
+                    target_path=guest_target_path,
+                )
+                stage_resp = await self._send_with_retry(
+                    "POST",
+                    "/sample/stage",
+                    json_body=stage_req.model_dump(exclude_none=True),
+                    timeout=timeout or self._default_timeout,
+                    label="stage_sample_fallback",
+                )
+                envelope = ResponseEnvelope.model_validate(stage_resp.json())
+                if not envelope.success:
+                    raise GuestAgentError(envelope.error_code, envelope.error_message)
+                stage_data = SampleStageData.model_validate(envelope.data or {})
+        else:
+            stage_data = SampleStageData.model_validate(envelope.data or {})
         returned_sha256 = (stage_data.sha256 or expected_sha256).lower()
         if returned_sha256 != expected_sha256:
             raise ValueError(
@@ -934,7 +973,65 @@ class HTTPGuestChannel:
             stdout=proc_data.stdout or "",
             stderr=proc_data.stderr or "",
             termination_reason=decode_ntstatus(rc),
+            pid=proc_data.pid,
         )
+
+    async def terminate_process(
+        self,
+        pid: int | None = None,
+        name: str | None = None,
+    ) -> int:
+        """
+        Calls guest agent POST /process/terminate to terminate a process by PID or Name.
+        Returns the count of terminated processes.
+        """
+        req = ProcessTerminateRequest(pid=pid, name=name)
+        result = await self._request(
+            "POST",
+            "/process/terminate",
+            json_body=req.model_dump(exclude_none=True),
+            label=f"terminate_process: pid={pid} name={name}",
+        )
+        if result is None:
+            return 0
+        try:
+            data = ProcessTerminateData.model_validate(result)
+            logger.info(
+                "[HTTPGuestChannel] terminate_process pid=%s name=%s terminated_count=%d",
+                pid, name, data.terminated_count,
+            )
+            return data.terminated_count
+        except Exception as exc:
+            logger.warning("Failed to validate ProcessTerminateData: %s", exc)
+            return 0
+
+    async def query_processes(
+        self,
+        pid: int | None = None,
+        name: str | None = None,
+    ) -> list[ProcessInfo]:
+        """
+        Calls guest agent GET /process/query to list running processes matching PID or Name.
+        """
+        params: dict[str, Any] = {}
+        if pid is not None:
+            params["pid"] = pid
+        if name is not None:
+            params["name"] = name
+        result = await self._request(
+            "GET",
+            "/process/query",
+            params=params,
+            label=f"query_processes: pid={pid} name={name}",
+        )
+        if result is None:
+            return []
+        try:
+            data = ProcessQueryData.model_validate(result)
+            return data.processes
+        except Exception as exc:
+            logger.warning("Failed to validate ProcessQueryData: %s", exc)
+            return []
 
     async def apply_mutation(self, kind: str, target: str, operation: str, value: str | None) -> None:
         """
@@ -1022,18 +1119,21 @@ class HTTPGuestChannel:
                         target, result.return_code if result else "N/A", result.stdout if result else "", result.stderr if result else "",
                     )
                 elif op_upper in ("TERMINATE", "STOP", "KILL"):
-                    proc_name = target.removesuffix(".exe")
-                    cmd = f"Stop-Process -Name '{proc_name}' -Force -ErrorAction SilentlyContinue"
-                    result = await self.run_process(
-                        "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
-                        ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", cmd],
-                        wait=True,
-                        timeout_s=60.0,
-                    )
+                    target_str = str(target).strip()
+                    term_count = 0
+                    if target_str.isdigit() and int(target_str) > 0:
+                        term_count = await self.terminate_process(pid=int(target_str))
+                    elif value and str(value).strip().isdigit() and int(str(value).strip()) > 0:
+                        term_count = await self.terminate_process(pid=int(str(value).strip()))
+                    else:
+                        proc_name = target_str.removesuffix(".exe")
+                        term_count = await self.terminate_process(name=proc_name)
                     logger.info(
-                        "[HTTPGuestChannel] apply_mutation PROCESS TERMINATE target=%s rc=%s stdout=%s stderr=%s",
-                        target, result.return_code if result else "N/A", result.stdout if result else "", result.stderr if result else "",
+                        "[HTTPGuestChannel] apply_mutation PROCESS %s target=%s value=%s terminated_count=%d",
+                        op_upper, target, value, term_count,
                     )
+                    return
+
                 elif op_upper in ("SET", "RESET"):
                     # System clock acceleration / time reset lures
                     logger.info(
@@ -1042,16 +1142,37 @@ class HTTPGuestChannel:
                     )
                     return
             elif "NETWORK" in kind_upper:
-                # Network-layer mutations (RESPOND, MOUNT, UNMOUNT, etc.) require
-                # host-side network interception (e.g. WinDivert, fake DNS, or a
-                # local proxy) that the guest HTTP agent does not implement.
-                # Raise explicitly so base.py sets status=FAILED and the log shows
-                # a real error rather than silently succeeding as a no-op.
-                raise NotImplementedError(
-                    f"apply_mutation: NETWORK kind operations are not implemented in "
-                    f"HTTPGuestChannel (kind={kind!r}, operation={operation!r}, target={target!r}). "
-                    f"Host-side network interception is required."
-                )
+                if self._network_interceptor is not None:
+                    if op_upper == "RESPOND":
+                        await self._network_interceptor.respond(target, value)
+                        logger.info("[HTTPGuestChannel] apply_mutation NETWORK RESPOND target=%s registered with interceptor", target)
+                        return
+                    elif op_upper == "UNRESPOND":
+                        await self._network_interceptor.unrespond(target)
+                        logger.info("[HTTPGuestChannel] apply_mutation NETWORK UNRESPOND target=%s removed from interceptor", target)
+                        return
+                    elif op_upper == "MOUNT":
+                        await self._network_interceptor.mount_share(target, value)
+                        logger.info("[HTTPGuestChannel] apply_mutation NETWORK MOUNT target=%s registered with interceptor", target)
+                        return
+                    elif op_upper == "UNMOUNT":
+                        await self._network_interceptor.unmount_share(target)
+                        logger.info("[HTTPGuestChannel] apply_mutation NETWORK UNMOUNT target=%s removed from interceptor", target)
+                        return
+                    else:
+                        raise NotImplementedError(
+                            f"apply_mutation: unsupported NETWORK operation {operation!r} for target {target!r}"
+                        )
+                else:
+                    # Network-layer mutations (RESPOND, MOUNT, UNMOUNT, etc.) require
+                    # host-side network interception (e.g. WinDivert, fake DNS, or a
+                    # local proxy) that the guest HTTP agent does not implement.
+                    # Raise explicitly when no interceptor is configured.
+                    raise NotImplementedError(
+                        f"apply_mutation: NETWORK kind operations require a NetworkInterceptor "
+                        f"(kind={kind!r}, operation={operation!r}, target={target!r}). "
+                        f"Host-side network interception is required."
+                    )
             else:
                 # Unknown kind: raise rather than silently no-op.
                 raise NotImplementedError(
@@ -1084,6 +1205,23 @@ class HTTPGuestChannel:
         several files in the same mutation, such as
         :class:`~adam.deception.primitives.filesystem_lures.PlantDecoyDocuments`.
 
+        Implementation note (Phase fix for Limitation #2):
+        ---------------------------------------------------
+        The previous implementation built a compound ``cmd.exe /c`` command string
+        with embedded single-quoted PowerShell statements joined by ``;``.  When
+        ``Common.psm1`` (``Invoke-NativeProcess``) serialised the arguments via
+        ``ProcessStartInfo``, inner quotes were escaped as ``\\\"``.  ``cmd.exe``
+        treats ``\\`` as a path separator rather than a quote escape, causing
+        consistent ``rc=1`` (``The filename, directory name, or volume label
+        syntax is incorrect``) or ``stdin`` stalls (``TIMEOUT: process did not
+        exit within 30s``).
+
+        The fix encodes the entire file-creation manifest as a Base64 JSON
+        payload and uses PowerShell's ``-EncodedCommand`` parameter, which
+        accepts a Base64-encoded UTF-16LE script block directly.  This bypasses
+        ``cmd.exe`` entirely and eliminates all quoting ambiguity regardless of
+        what characters appear in file paths or content.
+
         Raises
         ------
         ValueError
@@ -1096,20 +1234,43 @@ class HTTPGuestChannel:
             raise ValueError("apply_mutation_batch: file_creates list must not be empty")
 
         async with self._mutation_lock:
-            stmts: list[str] = []
-            for target, value in file_creates:
-                target_norm = target.replace("/", "\\").replace("'", "''")
-                val_text = (value or "").replace("'", "''")
-                stmts.append(
-                    f"$p = Split-Path -Parent '{target_norm}'; "
-                    f"if (-not (Test-Path $p)) {{ New-Item -ItemType Directory -Force -Path $p | Out-Null }}; "
-                    f"Set-Content -Path '{target_norm}' -Value '{val_text}' -Force"
-                )
+            import json as _json
 
-            cmd = "; ".join(stmts)
+            # Build a JSON manifest of files to create — transmitted as Base64
+            # so no quoting/escaping issues can arise regardless of content.
+            file_manifest = [
+                {"path": target.replace("/", "\\"), "content": value or ""}
+                for target, value in file_creates
+            ]
+            json_payload = _json.dumps(file_manifest)
+            b64_json = base64.b64encode(json_payload.encode("utf-8")).decode("ascii")
+
+            # Self-contained PowerShell script that decodes the manifest and
+            # creates every file. The payload is standard Base64 ([A-Za-z0-9+/=])
+            # so embedding it inside single quotes in the script is guaranteed safe.
+            ps_script = (
+                f"$b64 = '{b64_json}'; "
+                "$jsonText = [System.Text.Encoding]::UTF8.GetString("
+                "[System.Convert]::FromBase64String($b64)); "
+                "$files = $jsonText | ConvertFrom-Json; "
+                "foreach ($f in $files) { "
+                "  $dir = Split-Path -Parent $f.path; "
+                "  if (-not (Test-Path $dir)) { "
+                "    New-Item -ItemType Directory -Force -Path $dir | Out-Null "
+                "  }; "
+                "  Set-Content -Path $f.path -Value $f.content -Force "
+                "}"
+            )
+            # Encode the script itself as UTF-16LE Base64 for -EncodedCommand
+            encoded_cmd = base64.b64encode(
+                ps_script.encode("utf-16-le")
+            ).decode("ascii")
+
+            # -EncodedCommand takes a single Base64 argument with no quotes, spaces,
+            # or special characters, eliminating any cmd.exe quote-stripping issues.
             result = await self.run_process(
                 "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
-                ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", cmd],
+                ["-NoProfile", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encoded_cmd],
                 wait=True,
                 timeout_s=timeout_s,
             )

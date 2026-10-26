@@ -41,3 +41,6 @@ ruff>=0.12
 # Static type checking
 mypy>=1.16
 python-multipart>=0.0.32
+
+# Host-side network interception (NETWORK mutations)
+mitmproxy>=12.0.0

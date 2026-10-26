@@ -175,6 +175,7 @@ _ENDPOINT_MODELS: dict[tuple[str, str], tuple[type[hm.BaseModel] | None, type[hm
     ("POST", "/network/convert"): (hm.NetworkConvertRequest, hm.NetworkConvertData),
     ("POST", "/sysmon/export"): (hm.SysmonExportRequest, hm.SysmonExportData),
     ("GET", "/sysmon/diagnostics"): (None, hm.SysmonDiagnosticsData),
+    ("GET", "/sysmon/events/since"): (None, hm.SysmonEventsSinceData),
     ("GET", "/diagnostics/token"): (None, hm.TokenData),
     ("GET", "/diagnostics/services"): (None, hm.ServicesData),
     ("GET", "/diagnostics/drivers"): (None, hm.DriversData),
@@ -246,6 +247,7 @@ def test_no_endpoint_models_are_unmapped_or_orphaned() -> None:
         "ResponseEnvelope", "GuestAgentError", "GuestAgentUnreachableError",
         "FileEntry", "ProcessInfo", "NetworkInterface", "TokenGroup",
         "TokenPrivilege", "ServiceInfo", "DriverInfo", "ArtifactInfo",
+        "SysmonRecordItem",
     }
     mapped_models = {m.__name__ for pair in _ENDPOINT_MODELS.values() for m in pair if m is not None}
 

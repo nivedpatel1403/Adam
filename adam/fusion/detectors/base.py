@@ -57,13 +57,13 @@ class BaseDetector(ABC):
             event_score = 0
 
             if any(i in searchable for i in self.STRONG_INDICATORS):
-                event_score = max(event_score, 5)
+                event_score += 5
 
             if any(i in searchable for i in self.MEDIUM_INDICATORS):
-                event_score = max(event_score, 3)
+                event_score += 3
 
             if any(i in searchable for i in self.WEAK_INDICATORS):
-                event_score = max(event_score, 2)
+                event_score += 2
 
             if event_score:
                 matched.append(event)

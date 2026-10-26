@@ -49,6 +49,13 @@ class PolicyEngine(IPolicyEngine):
             verdict, rationale = self._gate(rule, event, context)
             evaluation_ms = (time.perf_counter() - start) * 1000
 
+            params = dict(rule.parameters)
+            if event.actor and event.actor.pid:
+                params.setdefault("actor_pid", event.actor.pid)
+                params.setdefault("target", str(event.actor.pid))
+            if event.actor and event.actor.image:
+                params.setdefault("process_name", event.actor.image)
+
             decision = PolicyDecision(
                 decision_id=f"dec_{uuid.uuid4().hex[:12]}",
                 session_id=event.session_id,
@@ -59,7 +66,7 @@ class PolicyEngine(IPolicyEngine):
                 action=rule.action if verdict in (Verdict.EXECUTE, Verdict.DRY_RUN) else None,
                 verdict=verdict,
                 priority=rule.priority,
-                parameters=rule.parameters,
+                parameters=params,
                 rationale=rationale,
                 evaluation_ms=evaluation_ms,
             )

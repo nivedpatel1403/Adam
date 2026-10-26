@@ -19,10 +19,14 @@ class CommandAndControlDetector(BaseDetector):
         "wget http",
         "powershell iwr",
         "powershell invoke-webrequest",
+        "invoke-webrequest",
+        "iwr http",
         "certutil -urlcache",
         "bitsadmin",
         "nc.exe",
         "netcat",
+        "c2_beacon",
+        "c2_beacon_test",
     ]
 
     MEDIUM_INDICATORS = [
@@ -33,6 +37,7 @@ class CommandAndControlDetector(BaseDetector):
         "beacon",
         "callback",
         "reverse shell",
+        "c2.baddomain.org",
     ]
 
     WEAK_INDICATORS = [

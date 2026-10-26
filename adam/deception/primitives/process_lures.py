@@ -110,3 +110,28 @@ class SpawnDecoyProcesses(DeceptionPrimitive):
             await self._channel.apply_mutation(change.kind.value, change.target, "TERMINATE", None)
         mutation.status = MutationStatus.REVERTED
         return mutation
+
+
+@register_primitive("TERMINATE_PROCESS")
+class TerminateProcess(DeceptionPrimitive):
+    name = "TerminateProcess"
+    version = "1.0"
+
+    async def _build_changes(self, parameters: dict[str, Any]) -> list[Change]:
+        target = str(parameters.get("actor_pid") or parameters.get("target") or "0")
+        val = str(parameters.get("process_name") or parameters.get("value") or "malicious_process")
+        return [
+            Change(
+                kind=ChangeKind.PROCESS,
+                target=target,
+                operation="TERMINATE",
+                value=val,
+            )
+        ]
+
+    def _plausibility(self, parameters: dict[str, Any]) -> tuple[float, str]:
+        return 1.0, "Terminated offending process on high-severity policy trigger"
+
+    async def revert_async(self, mutation: MutationResult) -> MutationResult:
+        mutation.status = MutationStatus.REVERTED
+        return mutation

@@ -53,6 +53,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import Coroutine, Any
 
 from adam.contracts.interfaces import MutationRequest, MutationResult
@@ -182,21 +183,26 @@ class SandboxController:
                 "wait_for_state(running)",
                 self._client.wait_for_state(self._vm_name, "running", timeout=self._boot_timeout),
             )
-            await self._step(
-                "wait_for_guest_ready",
-                self._client.wait_for_guest_ready(
-                    self._vm_name,
-                    guest_username=self._guest_username,
-                    guest_password=self._guest_password,
-                    timeout=self._guest_ready_timeout,
-                ),
-            )
-
-            self._state = SandboxState.AGENT_HANDSHAKE
-            if self._guest_channel is not None:
-                if hasattr(self._guest_channel, "wait_until_ready"):
-                    await self._guest_channel.wait_until_ready()
-                else:
+            if self._guest_channel is not None and hasattr(self._guest_channel, "wait_until_ready"):
+                self._state = SandboxState.AGENT_HANDSHAKE
+                logger.info(
+                    "controller.prepare: waiting for guest agent handshake (channel=%s, timeout=%.1fs)",
+                    type(self._guest_channel).__name__,
+                    self._guest_ready_timeout,
+                )
+                await self._guest_channel.wait_until_ready(timeout_s=self._guest_ready_timeout)
+            else:
+                await self._step(
+                    "wait_for_guest_ready",
+                    self._client.wait_for_guest_ready(
+                        self._vm_name,
+                        guest_username=self._guest_username,
+                        guest_password=self._guest_password,
+                        timeout=self._guest_ready_timeout,
+                    ),
+                )
+                self._state = SandboxState.AGENT_HANDSHAKE
+                if self._guest_channel is not None:
                     await self._guest_channel.verify_tools()
 
                 # Apply profile persona if specified
@@ -295,12 +301,33 @@ class SandboxController:
         try:
             if self._guest_channel is not None and hasattr(self._guest_channel, "run_process"):
                 try:
-                    result = await self._guest_channel.run_process(
+                    # Launch asynchronously (wait=False) so the single-threaded guest HTTP listener
+                    # is never blocked, allowing live Sysmon polling and live policy containment actions.
+                    start_res = await self._guest_channel.run_process(
                         executable_path=self._armed_guest_target_path,
                         arguments=None,
-                        wait=True,
-                        timeout_s=self._detonate_timeout,
+                        wait=False,
+                        timeout_s=None,
                     )
+                    target_pid = getattr(start_res, "pid", None)
+                    logger.info("session sample started on guest with PID=%s (detached)", target_pid)
+                    result = start_res
+
+                    # Wait for sample to exit or be killed, polling query_processes every 0.5s up to detonate_timeout
+                    detonate_start = time.monotonic()
+                    while (time.monotonic() - detonate_start) < self._detonate_timeout:
+                        await asyncio.sleep(0.5)
+                        if target_pid is not None and hasattr(self._guest_channel, "query_processes"):
+                            try:
+                                procs = await self._guest_channel.query_processes(pid=target_pid)
+                                if not procs:
+                                    logger.info(
+                                        "session sample PID=%s exited / was terminated after %.2fs",
+                                        target_pid, time.monotonic() - detonate_start,
+                                    )
+                                    break
+                            except Exception:
+                                pass
                 except GuestAgentUnreachableError as exc:
                     logger.warning(
                         "HTTP guest agent unreachable during detonate(), falling back to guestcontrol run: %s",

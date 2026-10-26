@@ -118,7 +118,9 @@ def wire_engines(
     async def _dry_run_for(session_id: str) -> bool:
         if resolve_dry_run is None:
             return await _default_dry_run(session_id)
-        result = await resolve_dry_run(session_id)
+        import inspect
+        res = resolve_dry_run(session_id)
+        result = await res if inspect.isawaitable(res) else res
         return True if result is None else result
 
     async def handle_raw_event(env: Envelope[RawEvent]) -> None:

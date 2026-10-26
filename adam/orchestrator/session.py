@@ -103,17 +103,19 @@ from pydantic import BaseModel, ConfigDict
 
 from adam.collectors.base import BaseCollector
 from adam.collectors.network import NetworkCollector
+from adam.collectors.parsers.evtx import _parse_system_time
 from adam.collectors.procmon import ProcmonCollector
 from adam.collectors.sysmon import SysmonCollector
 from adam.common.bus import EventBus
 from adam.common.config import Settings
-from adam.contracts.enums import Arm, NetworkMode, SessionStatus
+from adam.contracts.enums import Arm, Category, NetworkMode, SessionStatus, Source
 from adam.contracts.envelope import Envelope
-from adam.contracts.raw_event import RawEvent
+from adam.contracts.raw_event import ProcessInfo, RawEvent
 from adam.contracts.session import AnalysisSession, SampleRef, SessionConfig, SessionLifecycle, SessionMetrics
 from adam.orchestrator.persistence import RawEventWriter
 from adam.sandbox.controller import SandboxController
 from adam.sandbox.guest.channel import GuestChannel, TelemetryArtifacts
+from adam.sandbox.guest.http_models import SysmonRecordItem
 
 logger = logging.getLogger(__name__)
 
@@ -139,6 +141,62 @@ def build_collectors_from_telemetry(session_id: str, artifacts: TelemetryArtifac
     if artifacts.network_ek_json_path is not None:
         collectors.append(NetworkCollector(artifacts.network_ek_json_path, session_id=session_id))
     return collectors
+
+
+def raw_event_from_sysmon_item(item: SysmonRecordItem, session_id: str) -> RawEvent:
+    occurred_at = _parse_system_time(item.time_created)
+    observed_at = datetime.now(timezone.utc)
+    category = Category.PROCESS if item.event_id == 1 else Category.NETWORK
+    data = dict(item.data or {})
+
+    proc_info = None
+    if item.event_id == 1:
+        pid = int(data.get("ProcessId") or 0)
+        ppid = int(data.get("ParentProcessId") or 0)
+        image = data.get("Image") or "unknown.exe"
+        cmd = data.get("CommandLine") or ""
+        user = data.get("User") or "-"
+        integrity = data.get("IntegrityLevel") or "-"
+        guid = data.get("ProcessGuid") or "-"
+        proc_info = ProcessInfo(
+            pid=pid,
+            ppid=ppid,
+            image=image,
+            command_line=cmd,
+            integrity_level=integrity,
+            user=user,
+            guid=guid,
+        )
+        data["command_line"] = cmd
+        data["process_name"] = image
+    elif item.event_id == 3:
+        pid = int(data.get("ProcessId") or 0)
+        image = data.get("Image") or "unknown.exe"
+        user = data.get("User") or "-"
+        guid = data.get("ProcessGuid") or "-"
+        proc_info = ProcessInfo(
+            pid=pid,
+            ppid=0,
+            image=image,
+            command_line="-",
+            integrity_level="-",
+            user=user,
+            guid=guid,
+        )
+        data["process_name"] = image
+
+    return RawEvent(
+        event_id=f"raw_{uuid.uuid4().hex[:12]}",
+        session_id=session_id,
+        source=Source.SYSMON,
+        source_event_id=item.record_id,
+        category=category,
+        occurred_at=occurred_at,
+        observed_at=observed_at,
+        process=proc_info,
+        attributes=data,
+        raw_ref=f"guest:sysmon:{item.record_id}",
+    )
 
 
 def new_session_id() -> str:
@@ -257,6 +315,67 @@ class SessionOrchestrator:
                     collector.source_name,
                 )
 
+    async def _run_live_sysmon_poll(
+        self,
+        session_id: str,
+        stop_event: asyncio.Event,
+        *,
+        initial_record_id: int = -1,
+    ) -> None:
+        """
+        Polls the guest agent incremental Sysmon endpoint every 1.0 second during
+        DETONATING. New ProcessCreate (EventID 1) and NetworkConnect (EventID 3) records
+        are converted to RawEvent and published onto the live EventBus immediately.
+        """
+        last_record_id = initial_record_id
+        if last_record_id < 0:
+            try:
+                last_record_id, _ = await self._guest_agent.get_sysmon_events_since(record_id=-1)
+                logger.info("session=%s live sysmon baseline record_id=%d established", session_id, last_record_id)
+            except Exception as exc:
+                logger.warning("session=%s failed to query sysmon baseline, starting at 0: %s", session_id, exc)
+                last_record_id = 0
+        else:
+            logger.info("session=%s using pre-established live sysmon baseline record_id=%d", session_id, last_record_id)
+
+        while not stop_event.is_set():
+            try:
+                await asyncio.sleep(1.0)
+                if stop_event.is_set():
+                    break
+                next_id, records = await self._guest_agent.get_sysmon_events_since(record_id=last_record_id)
+                if next_id > last_record_id:
+                    last_record_id = next_id
+
+                for record in records:
+                    raw_event = raw_event_from_sysmon_item(record, session_id=session_id)
+                    wall_clock_now = datetime.now(timezone.utc)
+                    gap = (wall_clock_now - raw_event.occurred_at).total_seconds()
+                    logger.info(
+                        "[LIVE_POLL] record_id=%d EventID=%d TimeCreated=%s ObservedAt=%s Gap=%.3fs Image=%s PID=%s",
+                        record.record_id,
+                        record.event_id,
+                        record.time_created,
+                        wall_clock_now.isoformat(),
+                        gap,
+                        raw_event.process.image if raw_event.process else "N/A",
+                        raw_event.process.pid if raw_event.process else "N/A",
+                    )
+                    envelope: Envelope[RawEvent] = Envelope(
+                        message_id=f"msg_{uuid.uuid4().hex}",
+                        message_type="RawEvent",
+                        session_id=session_id,
+                        correlation_id=raw_event.event_id,
+                        emitted_at=wall_clock_now,
+                        emitter="collector.sysmon.live",
+                        payload=raw_event,
+                    )
+                    await self._bus.publish(envelope)
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                logger.exception("session=%s error in live sysmon poll cycle", session_id)
+
     async def run_session(
         self,
         sample: SampleRef,
@@ -328,10 +447,11 @@ class SessionOrchestrator:
 
         deception_enabled = getattr(config.deception, "enable_clock_manipulation", True) if hasattr(config, "deception") else False
         arm = Arm.TREATMENT if deception_enabled else Arm.CONTROL
+        vm_profile_name = getattr(self._controller, "vm_profile", None) or config.sandbox.vm_name
         session_config = SessionConfig(
             deception_enabled=deception_enabled,
             policy_ruleset="default" if deception_enabled else "none",
-            vm_profile=getattr(self._controller, "vm_profile", config.sandbox.vm_name),
+            vm_profile=vm_profile_name,
             timeout_seconds=sample_timeout_seconds,
             network_mode=NetworkMode.HOST_ONLY,
         )
@@ -432,7 +552,32 @@ class SessionOrchestrator:
 
             status = SessionStatus.RUNNING
             await self._publish_lifecycle(session_id, status, "detonating sample")
-            await self._controller.detonate(sample)
+
+            live_poll_task: asyncio.Task[None] | None = None
+            stop_live_poll = asyncio.Event()
+            if self._guest_agent is not None and hasattr(self._guest_agent, "get_sysmon_events_since"):
+                # Baseline: query current max RecordId strictly *before* detonation starts
+                initial_record_id = -1
+                try:
+                    initial_record_id, _ = await self._guest_agent.get_sysmon_events_since(record_id=-1)
+                    logger.info("session=%s live sysmon pre-detonation baseline record_id=%d", session_id, initial_record_id)
+                except Exception as exc:
+                    logger.warning("session=%s failed to query sysmon pre-detonation baseline: %s", session_id, exc)
+
+                live_poll_task = asyncio.create_task(
+                    self._run_live_sysmon_poll(session_id, stop_live_poll, initial_record_id=initial_record_id),
+                    name=f"adam.orchestrator.live_sysmon_poll.{session_id}",
+                )
+
+            try:
+                await self._controller.detonate(sample)
+            finally:
+                if live_poll_task is not None:
+                    stop_live_poll.set()
+                    try:
+                        await asyncio.wait_for(live_poll_task, timeout=2.0)
+                    except (asyncio.TimeoutError, asyncio.CancelledError):
+                        live_poll_task.cancel()
 
             # Give constructor-injected collectors a short grace period to
             # pick up trailing telemetry (e.g. process-exit events) before

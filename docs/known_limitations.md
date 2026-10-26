@@ -1,41 +1,49 @@
 # ADAM System: Known Limitations & Operational Boundaries
 
-This document lists the known architectural and operational limitations of the ADAM automated malware analysis and dynamic deception system identified and audited during the Phase 1–4 verification cycle.
+This document lists the known architectural and operational limitations of the ADAM automated malware analysis and dynamic deception system, along with their resolution status following the implementation plan.
 
 ---
 
-### 1. `FABRICATE_C2_RESPONSE` & `NETWORK`-Kind Mutations Unimplemented
-- **Description**: The guest-resident HTTP agent (`adam_agent.ps1` / `HTTPGuestChannel`) executes mutations in-guest (filesystem, registry, processes) and does not implement kernel-level or network-stack packet redirection/interception. Any policy decision emitting `NETWORK`-kind operations (e.g. `FABRICATE_C2_RESPONSE`) fails fast with an explicit descriptive error.
-- **Evidence**:
-  ```text
-  2026-08-23 18:38:28,832 WARNING adam.pipeline.wiring: [DeceptionEngine] decision=dec_7d8f9c45421c action=FABRICATE_C2_RESPONSE mutation=mut_2f6063c04d74 FAILED: apply_mutation: NETWORK kind operations are not implemented in HTTPGuestChannel (kind='NETWORK', operation='RESPOND', target='http://c2.baddomain.org/beacon'). Host-side network interception is required.
-  ```
+### 1. `FABRICATE_C2_RESPONSE` & `NETWORK`-Kind Mutations
+- **Status**: **RESOLVED**
+- **Root Cause**: The guest-resident HTTP agent (`adam_agent.ps1` / `HTTPGuestChannel`) executes mutations in-guest (filesystem, registry, processes) and cannot intercept or forge network packets from within the guest.
+- **Resolution**: Implemented host-side network interception via `adam.sandbox.network.NetworkInterceptor`.
+  - Added `NetworkInterceptor` (`adam/sandbox/network/interceptor.py`) to manage C2 response fabrication and SMB share redirection on the host.
+  - Updated `HTTPGuestChannel` to accept an optional `network_interceptor` and delegate `NETWORK` kind mutations (`RESPOND`, `UNRESPOND`, `MOUNT`, `UNMOUNT`) to it.
+  - Updated `adam/orchestrator/runner.py` to construct and inject `NetworkInterceptor` when running HTTP guest backend.
+  - Added unit test suite in `tests/unit/test_network_interceptor.py`.
 
 ---
 
 ### 2. `PLANT_DECOY_DOCUMENTS` Syntax / Timeout via `apply_mutation_batch`
-- **Description**: `apply_mutation_batch` generates composite `cmd.exe /c` compound commands (`if not exist ... mkdir ... & (echo ...) > ...`). When formatted by `Common.psm1` (`Invoke-NativeProcess`), inner quotes are escaped as `\"`. Because `cmd.exe` treats `\` as a path character rather than a quote escape, `cmd.exe` consistently fails with `rc=1` (`The filename, directory name, or volume label syntax is incorrect`) or occasionally stalls waiting on `stdin` (`TIMEOUT: process did not exit within 30s`). Both failure signatures stem from the same underlying `cmd.exe` argument parsing incompatibility.
-- **Evidence**:
-  ```text
-  2026-08-23 18:38:30,261 WARNING adam.pipeline.wiring: [DeceptionEngine] decision=dec_0110702851f9 action=PLANT_DECOY_DOCUMENTS mutation=mut_2f49d8e127f8 FAILED: apply_mutation_batch failed (rc=1): The filename, directory name, or volume label syntax is incorrect.
-  ```
+- **Status**: **RESOLVED**
+- **Root Cause**: `apply_mutation_batch` generated composite `cmd.exe /c` commands with embedded quotes. When formatted by `Common.psm1` (`Invoke-NativeProcess`), inner quotes were escaped as `\"`, causing `cmd.exe` to fail with `rc=1` or stall on `stdin`.
+- **Resolution**: Rewrote `apply_mutation_batch` in `adam/sandbox/guest/http_channel.py`.
+  - Manifests of files to create are serialized to JSON and Base64-encoded.
+  - The script is executed directly via PowerShell `-EncodedCommand` with the Base64 payload embedded inside single quotes.
+  - This bypasses `cmd.exe` entirely and eliminates all quoting, backslash, semicolon, and quote-stripping issues.
+  - Added regression test suite in `tests/unit/test_apply_mutation_batch_quoting.py`.
 
 ---
 
-### 3. Procmon & Tshark Telemetry Unavailable in Current Golden Image
-- **Description**: The current golden guest snapshot (`disk-resized-36gb-c-drive`) does not have `Procmon64.exe` or `tshark.exe` installed at their expected locations (`C:\Users\Admin\Downloads\ProcessMonitor\Procmon64.exe` and `C:\Program Files\Wireshark\tshark.exe`). Sysmon (`Microsoft-Windows-Sysmon/Operational`) is currently the sole working live telemetry source.
-- **Evidence**:
-  ```text
-  2026-08-23 17:58:23,505 WARNING adam.sandbox.guest.http_channel: guest_http: tool unavailable -- procmon: not found in guest at configured path 'C:\Users\Admin\Downloads\ProcessMonitor\Procmon64.exe'
-  2026-08-23 17:58:23,505 WARNING adam.sandbox.guest.http_channel: guest_http: tool unavailable -- tshark: not found in guest at configured path 'C:\Program Files\Wireshark\tshark.exe'
-  ```
+### 3. Procmon & Tshark Telemetry in Golden Image
+- **Status**: **RESOLVED (Tooling + Graceful Degradation)**
+- **Root Cause**: The golden guest snapshot (`disk-resized-36gb-c-drive`) lacked `Procmon64.exe` and `tshark.exe` at configured paths.
+- **Resolution**:
+  - Created automated guest provisioning script `scripts/provision_guest_tools.ps1` to download and install Process Monitor, Wireshark/Tshark, accept EULAs, and check Sysmon.
+  - Authored comprehensive guide in `docs/guest-provisioning-guide.md` with snapshot instructions.
+  - Added `tool_availability` caching to `HTTPGuestChannel` and updated `start_captures()` to gracefully skip missing tools rather than producing error cascades.
+  - Added `tools_required` configuration flag in `config/default.toml` and `adam/common/config.py` (default: `false` for graceful degradation; `true` for strict fail-fast mode).
 
 ---
 
 ### 4. Synthetic Nature of `/simulate` API and Benchmark CLI
-- **Description**: The `/simulate` REST API routes and the `adam benchmark` CLI remain synthetic offline test harnesses that exercise policy and detection engines against static event traces, without orchestrating real VirtualBox VMs or guest agent detonation. This behavior is intentional and deferred out of scope for this live VM pipeline cycle.
-- **Evidence**:
-  ```text
-  adam/cli/benchmark.py and adam/api/routes/simulate.py utilize offline fixture feeds and mock guest channels by design, bypassing SandboxController.prepare() and live VM execution.
-  ```
+- **Status**: **RESOLVED (Real-Engine Hybrid Replay)**
+- **Root Cause**: `benchmark.py` hardcoded synthetic yield values (`ctrl_yield = 0.40`, `trt_yield = 0.85`), bypassing the real Fusion, Policy, and Deception engines.
+- **Resolution**:
+  - Rewrote `adam/cli/benchmark.py` to wire `EventBus`, `EventFusionEngine`, `PolicyEngine`, and `DeceptionEngine` via `wire_engines()` for both Control (`dry_run=True`) and Treatment (`dry_run=False`) arms.
+  - Benchmark now derives empirical paired yields, event counts, decision counts, and primitive plausibility metrics directly from pipeline executions.
+  - Enhanced `/simulate` endpoint in `adam/api/main.py` with proper database commits and bus drain synchronization.
+  - Added integration test `tests/integration/test_benchmark_real_engines.py` verifying real engine execution, input-sensitive metrics, and treatment yield advantage.
+
 

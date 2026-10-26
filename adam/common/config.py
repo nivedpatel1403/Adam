@@ -135,6 +135,7 @@ class GuestToolsSettings(BaseModel):
     sysmon_log: str = "Microsoft-Windows-Sysmon/Operational"
     tshark_interface: str = "1"
     capture_dir: str = "C:\\ADAM\\telemetry"
+    tools_required: bool = False
 
     tool_verify_timeout_s: float = Field(default=15.0, gt=0)
     procmon_terminate_timeout_s: float = Field(default=15.0, gt=0)
@@ -176,6 +177,7 @@ class HttpGuestSettings(BaseModel):
     sysmon_log: str = "Microsoft-Windows-Sysmon/Operational"
     tshark_interface: str = "1"
     capture_dir: str = "C:\\ADAM\\telemetry"
+    tools_required: bool = False
 
     @property
     def base_url(self) -> str:

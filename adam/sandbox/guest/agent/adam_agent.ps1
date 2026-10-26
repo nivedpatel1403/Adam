@@ -73,7 +73,7 @@ $Script:RequiredCommandsByModule = [ordered]@{
     'ProcessManager.psm1'     = @('Invoke-ProcessStart', 'Invoke-ProcessTerminate', 'Invoke-ProcessWait', 'Invoke-ProcessQuery')
     'ProcmonManager.psm1'     = @('Invoke-ProcmonStart', 'Invoke-ProcmonStop', 'Invoke-ProcmonExport', 'Get-ProcmonBackingFileStatus')
     'NetworkManager.psm1'     = @('Get-NetworkInterfaces', 'Invoke-NetworkStart', 'Invoke-NetworkStop', 'Invoke-NetworkConvert')
-    'SysmonManager.psm1'      = @('Invoke-SysmonExport', 'Get-SysmonDiagnostics')
+    'SysmonManager.psm1'      = @('Invoke-SysmonExport', 'Get-SysmonDiagnostics', 'Get-SysmonEventsSince')
     'DiagnosticsManager.psm1' = @('Get-DiagnosticsToken', 'Get-DiagnosticsServices', 'Get-DiagnosticsDrivers')
     'SampleManager.psm1'      = @('Invoke-SampleUpload', 'Invoke-SampleStage')
     'ArtifactManager.psm1'    = @('Invoke-ArtifactList', 'Invoke-ArtifactPackage', 'Get-ArtifactMetadata')
@@ -330,6 +330,15 @@ function Invoke-Route {
             $channel = Get-QueryParam -Request $Request -Name 'channel'
             if (-not $channel) { $channel = $Script:Config['SysmonLog'] }
             return @{ Kind = 'json'; Envelope = (Get-SysmonDiagnostics -Channel $channel) }
+        }
+        'GET /sysmon/events/since' {
+            $recordId = Get-QueryParam -Request $Request -Name 'record_id'
+            $eventIds = Get-QueryParam -Request $Request -Name 'event_ids'
+            $channel = Get-QueryParam -Request $Request -Name 'channel'
+            if (-not $channel) { $channel = $Script:Config['SysmonLog'] }
+            $rId = if ($recordId) { [int]$recordId } else { 0 }
+            $eIds = if ($eventIds) { $eventIds } else { '1,3' }
+            return @{ Kind = 'json'; Envelope = (Get-SysmonEventsSince -RecordId $rId -EventIds $eIds -Channel $channel) }
         }
 
         # ---------------- Diagnostics ----------------

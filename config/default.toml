@@ -50,12 +50,14 @@ guest_ready_timeout_s = 300.0
 # docstring. Sysmon itself is not configured here: it is assumed already
 # installed and running as a guest service (docs/implementation-audit.md,
 # Phase 5) -- only the event log channel it writes to is named.
+# Run scripts/provision_guest_tools.ps1 inside the guest VM to install Procmon and Tshark.
 [guest_tools]
 procmon_path  = "C:\\Users\\Admin\\Downloads\\ProcessMonitor\\Procmon64.exe"
 tshark_path   = "C:\\Program Files\\Wireshark\\tshark.exe"
 sysmon_log    = "Microsoft-Windows-Sysmon/Operational"
 tshark_interface = "1"
 capture_dir   = "C:\\ADAM\\telemetry"
+tools_required = false
 
 # Only consulted when guest_backend = "http" (set above, before [sandbox] --
 # it must stay a root-level key). host/port must match
@@ -78,6 +80,7 @@ tshark_path   = "C:\\Program Files\\Wireshark\\tshark.exe"
 sysmon_log    = "Microsoft-Windows-Sysmon/Operational"
 tshark_interface = "1"
 capture_dir   = "C:\\ADAM\\telemetry"
+tools_required = false
 
 [db]
 path = "adam_local.db"

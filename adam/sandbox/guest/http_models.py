@@ -299,6 +299,18 @@ class SysmonDiagnosticsData(BaseModel):
     event_count: int | None = None
 
 
+class SysmonRecordItem(BaseModel):
+    record_id: int
+    event_id: int
+    time_created: str
+    data: dict[str, Any] = Field(default_factory=dict)
+
+
+class SysmonEventsSinceData(BaseModel):
+    last_record_id: int
+    events: list[SysmonRecordItem] = Field(default_factory=list)
+
+
 # --------------------------------------------------------------------- #
 # Diagnostics (spec section 9)
 # --------------------------------------------------------------------- #
