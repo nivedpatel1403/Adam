@@ -201,7 +201,7 @@ def run(
     requested_arm: Arm | None = None
     if arm is not None:
         try:
-            requested_arm = Arm(arm.strip().lower())
+            requested_arm = Arm(arm.strip().upper())
         except ValueError:
             console.print(
                 f"[red]error:[/red] invalid --arm {arm!r}; expected 'control' or 'treatment'"
