@@ -103,18 +103,20 @@ from pydantic import BaseModel, ConfigDict
 
 from adam.collectors.base import BaseCollector
 from adam.collectors.network import NetworkCollector
-from adam.collectors.parsers.evtx import _parse_system_time
+from adam.collectors.parsers.evtx import _parse_system_time, category_for_sysmon_event
 from adam.collectors.procmon import ProcmonCollector
 from adam.collectors.sysmon import SysmonCollector
 from adam.common.bus import EventBus
 from adam.common.config import Settings
-from adam.contracts.enums import Arm, Category, NetworkMode, SessionStatus, Source
+from adam.contracts.enums import Arm, NetworkMode, SessionStatus, Source
 from adam.contracts.envelope import Envelope
 from adam.contracts.raw_event import ProcessInfo, RawEvent
 from adam.contracts.session import AnalysisSession, SampleRef, SessionConfig, SessionLifecycle, SessionMetrics
+from adam.orchestrator.experiment import resolve_experiment
 from adam.orchestrator.persistence import RawEventWriter
 from adam.sandbox.controller import SandboxController
 from adam.sandbox.guest.channel import GuestChannel, TelemetryArtifacts
+from adam.sandbox.state import SandboxOperationError
 from adam.sandbox.guest.http_models import SysmonRecordItem
 
 logger = logging.getLogger(__name__)
@@ -143,47 +145,45 @@ def build_collectors_from_telemetry(session_id: str, artifacts: TelemetryArtifac
     return collectors
 
 
+def _sysmon_int(data: dict[str, object], key: str) -> int:
+    """Best-effort integer conversion for Sysmon's string-valued fields."""
+    try:
+        return int(str(data.get(key) or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
 def raw_event_from_sysmon_item(item: SysmonRecordItem, session_id: str) -> RawEvent:
+    """
+    Convert one live Sysmon record into the shared RawEvent contract.
+
+    The same EventID -> category mapping as the offline EVTX parser is
+    used, and process fields are populated for every event type. Registry,
+    file, and DNS records keep their identifying fields in
+    ``attributes`` so Fusion detectors can see them during the run.
+    """
     occurred_at = _parse_system_time(item.time_created)
     observed_at = datetime.now(timezone.utc)
-    category = Category.PROCESS if item.event_id == 1 else Category.NETWORK
+    category = category_for_sysmon_event(item.event_id)
     data = dict(item.data or {})
 
+    image = str(data.get("Image") or "").strip()
+    command_line = str(data.get("CommandLine") or "-")
+    data["command_line"] = command_line
+    if image:
+        data["process_name"] = image
+
     proc_info = None
-    if item.event_id == 1:
-        pid = int(data.get("ProcessId") or 0)
-        ppid = int(data.get("ParentProcessId") or 0)
-        image = data.get("Image") or "unknown.exe"
-        cmd = data.get("CommandLine") or ""
-        user = data.get("User") or "-"
-        integrity = data.get("IntegrityLevel") or "-"
-        guid = data.get("ProcessGuid") or "-"
+    if image:
         proc_info = ProcessInfo(
-            pid=pid,
-            ppid=ppid,
+            pid=_sysmon_int(data, "ProcessId"),
+            ppid=_sysmon_int(data, "ParentProcessId"),
             image=image,
-            command_line=cmd,
-            integrity_level=integrity,
-            user=user,
-            guid=guid,
+            command_line=command_line,
+            integrity_level=str(data.get("IntegrityLevel") or "-"),
+            user=str(data.get("User") or "-"),
+            guid=str(data.get("ProcessGuid") or "-"),
         )
-        data["command_line"] = cmd
-        data["process_name"] = image
-    elif item.event_id == 3:
-        pid = int(data.get("ProcessId") or 0)
-        image = data.get("Image") or "unknown.exe"
-        user = data.get("User") or "-"
-        guid = data.get("ProcessGuid") or "-"
-        proc_info = ProcessInfo(
-            pid=pid,
-            ppid=0,
-            image=image,
-            command_line="-",
-            integrity_level="-",
-            user=user,
-            guid=guid,
-        )
-        data["process_name"] = image
 
     return RawEvent(
         event_id=f"raw_{uuid.uuid4().hex[:12]}",
@@ -232,6 +232,7 @@ class SessionOrchestrator:
         bus_drain_timeout: float = 5.0,
         post_detonation_drain_seconds: float = 0.5,
         guest_agent: GuestChannel | None = None,
+        live_poll_enabled: bool = True,
     ) -> None:
         self._controller = controller
         self._bus = bus
@@ -244,6 +245,9 @@ class SessionOrchestrator:
         # pre-Phase-5 behavior exactly -- see module docstring's
         # "Guest-telemetry-source gap -- RESOLVED" note.
         self._guest_agent = guest_agent
+        # Tests and offline replay can disable polling without changing
+        # [live] configuration; both this flag and live.enabled must be true.
+        self._live_poll_enabled = live_poll_enabled
 
     def _guest_target_path_for(self, sample: SampleRef) -> str:
         return self._guest_target_path_template.format(filename=sample.filename)
@@ -321,56 +325,107 @@ class SessionOrchestrator:
         stop_event: asyncio.Event,
         *,
         initial_record_id: int = -1,
+        event_ids: str = "1,3,5,11,12,13,22",
+        poll_interval_s: float = 1.0,
+        batch_size: int = 100,
+        max_batches_per_cycle: int = 10,
     ) -> None:
         """
-        Polls the guest agent incremental Sysmon endpoint every 1.0 second during
-        DETONATING. New ProcessCreate (EventID 1) and NetworkConnect (EventID 3) records
-        are converted to RawEvent and published onto the live EventBus immediately.
+        Poll the guest agent's incremental Sysmon endpoint during DETONATING.
+
+        Each cycle drains up to ``max_batches_per_cycle`` batches of at most
+        ``batch_size`` records, publishing every record as a RawEvent. A
+        baseline failure disables live polling for the session: falling
+        back to record_id 0 would replay all pre-detonation history and
+        attribute it to the sample.
         """
         last_record_id = initial_record_id
         if last_record_id < 0:
             try:
-                last_record_id, _ = await self._guest_agent.get_sysmon_events_since(record_id=-1)
-                logger.info("session=%s live sysmon baseline record_id=%d established", session_id, last_record_id)
+                last_record_id, _ = await self._guest_agent.get_sysmon_events_since(
+                    record_id=-1, event_ids=event_ids
+                )
+                logger.info(
+                    "session=%s live sysmon baseline record_id=%d established",
+                    session_id,
+                    last_record_id,
+                )
             except Exception as exc:
-                logger.warning("session=%s failed to query sysmon baseline, starting at 0: %s", session_id, exc)
-                last_record_id = 0
+                logger.warning(
+                    "session=%s failed to query sysmon baseline -- live polling "
+                    "disabled for this session (not replaying history): %s",
+                    session_id,
+                    exc,
+                )
+                return
         else:
-            logger.info("session=%s using pre-established live sysmon baseline record_id=%d", session_id, last_record_id)
+            logger.info(
+                "session=%s using pre-established live sysmon baseline record_id=%d",
+                session_id,
+                last_record_id,
+            )
 
         while not stop_event.is_set():
             try:
-                await asyncio.sleep(1.0)
+                await asyncio.sleep(poll_interval_s)
                 if stop_event.is_set():
                     break
-                next_id, records = await self._guest_agent.get_sysmon_events_since(record_id=last_record_id)
-                if next_id > last_record_id:
-                    last_record_id = next_id
 
-                for record in records:
-                    raw_event = raw_event_from_sysmon_item(record, session_id=session_id)
-                    wall_clock_now = datetime.now(timezone.utc)
-                    gap = (wall_clock_now - raw_event.occurred_at).total_seconds()
-                    logger.info(
-                        "[LIVE_POLL] record_id=%d EventID=%d TimeCreated=%s ObservedAt=%s Gap=%.3fs Image=%s PID=%s",
-                        record.record_id,
-                        record.event_id,
-                        record.time_created,
-                        wall_clock_now.isoformat(),
-                        gap,
-                        raw_event.process.image if raw_event.process else "N/A",
-                        raw_event.process.pid if raw_event.process else "N/A",
+                for batch_index in range(max_batches_per_cycle):
+                    previous_id = last_record_id
+                    next_id, records = await self._guest_agent.get_sysmon_events_since(
+                        record_id=last_record_id, event_ids=event_ids
                     )
-                    envelope: Envelope[RawEvent] = Envelope(
-                        message_id=f"msg_{uuid.uuid4().hex}",
-                        message_type="RawEvent",
-                        session_id=session_id,
-                        correlation_id=raw_event.event_id,
-                        emitted_at=wall_clock_now,
-                        emitter="collector.sysmon.live",
-                        payload=raw_event,
-                    )
-                    await self._bus.publish(envelope)
+                    if next_id > last_record_id:
+                        last_record_id = next_id
+
+                    for record in records:
+                        try:
+                            raw_event = raw_event_from_sysmon_item(record, session_id=session_id)
+                        except Exception:
+                            logger.exception(
+                                "session=%s failed to convert live Sysmon record_id=%s EventID=%s",
+                                session_id,
+                                record.record_id,
+                                record.event_id,
+                            )
+                            continue
+
+                        wall_clock_now = datetime.now(timezone.utc)
+                        gap = (wall_clock_now - raw_event.occurred_at).total_seconds()
+                        logger.info(
+                            "[LIVE_POLL] record_id=%d EventID=%d TimeCreated=%s "
+                            "ObservedAt=%s Gap=%.3fs Image=%s PID=%s",
+                            record.record_id,
+                            record.event_id,
+                            record.time_created,
+                            wall_clock_now.isoformat(),
+                            gap,
+                            raw_event.process.image if raw_event.process else "N/A",
+                            raw_event.process.pid if raw_event.process else "N/A",
+                        )
+                        envelope: Envelope[RawEvent] = Envelope(
+                            message_id=f"msg_{uuid.uuid4().hex}",
+                            message_type="RawEvent",
+                            session_id=session_id,
+                            correlation_id=raw_event.event_id,
+                            emitted_at=wall_clock_now,
+                            emitter="collector.sysmon.live",
+                            payload=raw_event,
+                        )
+                        await self._bus.publish(envelope)
+
+                    # Stop when the batch was short (the guest drained its
+                    # current backlog) or the record ID did not advance.
+                    if len(records) < batch_size or next_id <= previous_id:
+                        break
+                    if batch_index == max_batches_per_cycle - 1:
+                        logger.warning(
+                            "session=%s live sysmon poll reached the %d-batch cap; "
+                            "the poller is falling behind the event stream",
+                            session_id,
+                            max_batches_per_cycle,
+                        )
             except asyncio.CancelledError:
                 break
             except Exception:
@@ -384,7 +439,8 @@ class SessionOrchestrator:
         host_sample_path: str,
         session_id: str | None = None,
         experiment_id: str = "adhoc",
-        arm: Arm = Arm.CONTROL,
+        arm: Arm | None = None,
+        deception_enabled: bool | None = None,
         sample_timeout_seconds: int = 300,
     ) -> AnalysisSession:
         """
@@ -445,12 +501,15 @@ class SessionOrchestrator:
         started_at = datetime.now(timezone.utc)
         guest_target_path = self._guest_target_path_for(sample)
 
-        deception_enabled = getattr(config.deception, "enable_clock_manipulation", True) if hasattr(config, "deception") else False
-        arm = Arm.TREATMENT if deception_enabled else Arm.CONTROL
+        experiment = resolve_experiment(
+            config,
+            arm=arm,
+            deception_enabled=deception_enabled,
+        )
         vm_profile_name = getattr(self._controller, "vm_profile", None) or config.sandbox.vm_name
         session_config = SessionConfig(
-            deception_enabled=deception_enabled,
-            policy_ruleset="default" if deception_enabled else "none",
+            deception_enabled=experiment.deception_enabled,
+            policy_ruleset=experiment.policy_ruleset,
             vm_profile=vm_profile_name,
             timeout_seconds=sample_timeout_seconds,
             network_mode=NetworkMode.HOST_ONLY,
@@ -504,26 +563,28 @@ class SessionOrchestrator:
                     )
                 )
 
-            await self._controller.arm(host_sample_path, guest_target_path)
-
-            # Diagnostics addition: verify_tools() is a pre-existing public
-            # GuestAgent method that was previously never actually called
-            # by this class -- its up-front tool-availability and guest-
-            # workspace-directory diagnostics therefore never ran on a real
-            # session. Calling it here (no interface change, no new
-            # method -- just a call-site addition) is what makes those
-            # diagnostics actually appear in a real run's logs. Guarded the
-            # same defense-in-depth way as every other guest_agent call in
-            # this method, even though GuestAgent's own methods are
-            # documented to never raise.
+            # Tool verification happens BEFORE arm(): a strict
+            # tools_required=true session must fail before the sample is
+            # staged into the guest, not after the VM has been armed.
             if self._guest_agent is not None:
                 try:
-                    await self._guest_agent.verify_tools()
+                    availability = await self._guest_agent.verify_tools()
                 except Exception:
                     logger.exception(
                         "session=%s guest_agent.verify_tools raised unexpectedly -- continuing anyway",
                         session_id,
                     )
+                else:
+                    if availability.required_missing:
+                        missing = ", ".join(availability.required_missing)
+                        raise SandboxOperationError(
+                            "verify_tools",
+                            RuntimeError(
+                                f"Required guest tools are unavailable: {missing}"
+                            ),
+                        )
+
+            await self._controller.arm(host_sample_path, guest_target_path)
 
             # Phase 5, steps 2-3: start Procmon/tshark captures inside the
             # guest, detached, before the sample runs. Sources already
@@ -555,19 +616,46 @@ class SessionOrchestrator:
 
             live_poll_task: asyncio.Task[None] | None = None
             stop_live_poll = asyncio.Event()
-            if self._guest_agent is not None and hasattr(self._guest_agent, "get_sysmon_events_since"):
-                # Baseline: query current max RecordId strictly *before* detonation starts
+            live = config.live
+            if (
+                self._live_poll_enabled
+                and live.enabled
+                and self._guest_agent is not None
+                and hasattr(self._guest_agent, "get_sysmon_events_since")
+            ):
+                # Baseline: query current max RecordId strictly *before*
+                # detonation starts. On failure, skip the poll task entirely
+                # rather than falling back to 0 (which replays history).
                 initial_record_id = -1
                 try:
-                    initial_record_id, _ = await self._guest_agent.get_sysmon_events_since(record_id=-1)
-                    logger.info("session=%s live sysmon pre-detonation baseline record_id=%d", session_id, initial_record_id)
+                    initial_record_id, _ = await self._guest_agent.get_sysmon_events_since(
+                        record_id=-1, event_ids=live.sysmon_event_ids
+                    )
+                    logger.info(
+                        "session=%s live sysmon pre-detonation baseline record_id=%d",
+                        session_id,
+                        initial_record_id,
+                    )
                 except Exception as exc:
-                    logger.warning("session=%s failed to query sysmon pre-detonation baseline: %s", session_id, exc)
-
-                live_poll_task = asyncio.create_task(
-                    self._run_live_sysmon_poll(session_id, stop_live_poll, initial_record_id=initial_record_id),
-                    name=f"adam.orchestrator.live_sysmon_poll.{session_id}",
-                )
+                    logger.warning(
+                        "session=%s failed to query sysmon pre-detonation baseline "
+                        "-- live polling disabled for this session (not replaying history): %s",
+                        session_id,
+                        exc,
+                    )
+                else:
+                    live_poll_task = asyncio.create_task(
+                        self._run_live_sysmon_poll(
+                            session_id,
+                            stop_live_poll,
+                            initial_record_id=initial_record_id,
+                            event_ids=live.sysmon_event_ids,
+                            poll_interval_s=live.poll_interval_s,
+                            batch_size=live.batch_size,
+                            max_batches_per_cycle=live.max_batches_per_cycle,
+                        ),
+                        name=f"adam.orchestrator.live_sysmon_poll.{session_id}",
+                    )
 
             try:
                 await self._controller.detonate(sample)
@@ -671,6 +759,16 @@ class SessionOrchestrator:
             except Exception:
                 logger.exception("session=%s bus drain failed", session_id)
 
+            # Remove the guest proxy/hosts redirect while the VM is still
+            # running and the guest agent is reachable; the interceptor
+            # itself is stopped by Runner after this returns.
+            try:
+                reset_redirect = getattr(self._controller, "reset_network_redirect", None)
+                if reset_redirect is not None:
+                    await reset_redirect()
+            except Exception:
+                logger.exception("session=%s guest network redirect cleanup failed", session_id)
+
             # SandboxController.teardown() is documented to never raise
             # (ARCHITECTURE.md section 14.4) -- guarded anyway, defense in
             # depth, consistent with every other cleanup step above.
@@ -686,7 +784,7 @@ class SessionOrchestrator:
         return AnalysisSession(
             session_id=session_id,
             experiment_id=experiment_id,
-            arm=arm,
+            arm=experiment.arm,
             sample=sample,
             config=session_config,
             status=status,

@@ -78,20 +78,29 @@ class MockGuestChannel:
         self.ready_called = False
         self.tools_verified = False
 
-    async def wait_until_ready(self) -> None:
+    async def wait_until_ready(self, timeout_s: float | None = None) -> None:
         self.ready_called = True
         if not self.healthy:
             raise TimeoutError("Agent /health check timed out")
 
     async def verify_tools(self) -> ToolAvailability:
         self.tools_verified = True
-        return ToolAvailability(sysmon=self.healthy, procmon=self.healthy, tshark=self.healthy)
+        return ToolAvailability(
+            procmon_available=self.healthy,
+            tshark_available=self.healthy,
+            sysmon_log_available=self.healthy,
+            detail={},
+        )
 
     async def start_captures(self, session_id: str, *, capture_procmon: bool = True, capture_network: bool = True) -> None:
         pass
 
     async def stop_export_and_fetch(self, session_id: str, host_artifact_dir: str, **kwargs) -> TelemetryArtifacts:
-        return TelemetryArtifacts(sysmon_evtx=None, procmon_csv=None, network_ek_json=None)
+        return TelemetryArtifacts(
+            sysmon_evtx_path=None,
+            procmon_csv_path=None,
+            network_ek_json_path=None,
+        )
 
 
 # --------------------------------------------------------------------------

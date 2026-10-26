@@ -131,7 +131,15 @@ class InMemoryGuestChannel:
         self.applied_mutations: list[tuple[str, str, str, str | None]] = []
         self.applied_batches: list[list[tuple[str, str | None]]] = []
 
-    async def apply_mutation(self, kind: str, target: str, operation: str, value: str | None) -> None:
+    async def apply_mutation(
+        self,
+        kind: str,
+        target: str,
+        operation: str,
+        value: str | None,
+        *,
+        value_type: str | None = None,
+    ) -> None:
         self.applied_mutations.append((kind, target, operation, value))
 
     async def apply_mutation_batch(
@@ -145,7 +153,8 @@ class InMemoryGuestChannel:
         return ToolAvailability(
             procmon_available=True,
             tshark_available=True,
-            sysmon_available=True,
+            sysmon_log_available=True,
+            detail={},
         )
 
     async def start_captures(

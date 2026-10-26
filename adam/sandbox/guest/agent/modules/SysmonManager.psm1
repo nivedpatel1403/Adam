@@ -111,11 +111,21 @@ function Get-SysmonEventsSince {
             }
         }
 
-        $idParts = @(foreach ($id in $EventIds.Split(',')) {
+        # EventIds is interpolated into an XPath.  Reject anything that is
+        # not a plain integer rather than silently dropping the bad token
+        # (which would broaden the query to every Sysmon event).
+        $idParts = @()
+        foreach ($id in $EventIds.Split(',')) {
             $trimmed = $id.Trim()
-            if ($trimmed -match '^\d+$') { "EventID=$trimmed" }
-        })
-        $idClause = if ($idParts.Count -gt 0) { "($($idParts -join ' or ')) and " } else { "" }
+            if ($trimmed -notmatch '^\d+$') {
+                return New-ErrorEnvelope -ErrorCode $Script:ErrorCodes.InvalidArgument -ErrorMessage "EventIds must be comma-separated integers; invalid token: '$trimmed'"
+            }
+            $idParts += "EventID=$trimmed"
+        }
+        if ($idParts.Count -eq 0) {
+            return New-ErrorEnvelope -ErrorCode $Script:ErrorCodes.InvalidArgument -ErrorMessage "EventIds must contain at least one EventID"
+        }
+        $idClause = "($($idParts -join ' or ')) and "
         $xpath = "*[System[${idClause}EventRecordID > $RecordId]]"
 
         $result = Invoke-NativeProcess -FilePath $wevtutil -ArgumentList @('qe', $Channel, "/q:$xpath", '/f:xml', '/c:100') -TimeoutMs 5000

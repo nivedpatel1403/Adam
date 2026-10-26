@@ -218,7 +218,7 @@ async def test_apply_revert_roundtrip_all_primitives():
         "PLANT_DECOY_DOCUMENTS": {},
         "PLANT_DECOY_WALLET": {},
         "INJECT_FAKE_BROWSER_CREDS": {},
-        "FABRICATE_C2_RESPONSE": {},
+        "FABRICATE_C2_RESPONSE": {"target_url": "http://198.51.100.7:8080/beacon"},
         "ACCELERATE_SYSTEM_CLOCK": {},
         "SPAWN_DECOY_PROCESSES": {},
         "MOUNT_FAKE_NETWORK_SHARE": {},
@@ -267,9 +267,15 @@ async def test_apply_revert_roundtrip_all_primitives():
                     f"{action}: unexpected revert op {rev_op!r}"
                 )
         else:
-            # Per-call apply path: original invariant.
-            assert len(revert_calls) == len(applied_calls), (
-                f"{action}: revert_calls ({len(revert_calls)}) != applied_calls ({len(applied_calls)})"
+            # Per-call apply path: original invariant, plus the network
+            # share's extra DELETE_KEY cleanup for its HKCU\Network\<Drive>
+            # subkey.
+            expected_revert_calls = len(applied_calls) + (
+                1 if action == "MOUNT_FAKE_NETWORK_SHARE" else 0
+            )
+            assert len(revert_calls) == expected_revert_calls, (
+                f"{action}: revert_calls ({len(revert_calls)}) != "
+                f"expected ({expected_revert_calls})"
             )
             # Verify inverse operations
             for app_call, rev_call in zip(reversed(applied_calls), revert_calls):
@@ -290,7 +296,7 @@ def test_plausibility_scores():
         "PLANT_DECOY_DOCUMENTS": {},
         "PLANT_DECOY_WALLET": {},
         "INJECT_FAKE_BROWSER_CREDS": {},
-        "FABRICATE_C2_RESPONSE": {},
+        "FABRICATE_C2_RESPONSE": {"target_url": "http://198.51.100.7:8080/beacon"},
         "ACCELERATE_SYSTEM_CLOCK": {},
         "SPAWN_DECOY_PROCESSES": {},
         "MOUNT_FAKE_NETWORK_SHARE": {},

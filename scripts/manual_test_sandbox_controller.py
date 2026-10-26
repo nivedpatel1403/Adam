@@ -127,7 +127,7 @@ def _new_controller(snapshot_name: str | None = None) -> SandboxController:
             tshark_path=settings.http_guest.tshark_path,
             sysmon_log=settings.http_guest.sysmon_log,
             tshark_interface=settings.http_guest.tshark_interface,
-            auth_token=getattr(settings.http_guest, "auth_token", "Adam_Sandbox_SecOps_2026!"),
+            auth_token=settings.http_guest.auth_token,
             guest_ready_timeout_s=sandbox_settings.guest_ready_timeout_s,
         )
     return SandboxController(

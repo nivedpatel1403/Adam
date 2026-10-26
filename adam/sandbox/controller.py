@@ -52,6 +52,7 @@ Error-handling design (read this before changing a method):
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import time
 from typing import Coroutine, Any
@@ -138,6 +139,25 @@ class SandboxController:
             raise SandboxOperationError(operation, result)
         return result
 
+    async def _call_wait_until_ready(self) -> None:
+        """
+        Call the guest channel's readiness handshake without assuming every
+        implementation accepts the same keyword arguments.
+
+        HTTPGuestChannel accepts `timeout_s`; the original VBox/test doubles
+        expose a zero-argument `wait_until_ready()`. Inspecting the bound
+        method's signature is deliberate: catching TypeError around the call
+        would also swallow genuine TypeErrors raised *inside* the channel.
+        """
+        wait = getattr(self._guest_channel, "wait_until_ready", None)
+        if wait is None:
+            return
+        parameters = inspect.signature(wait).parameters
+        if "timeout_s" in parameters:
+            await wait(timeout_s=self._guest_ready_timeout)
+        else:
+            await wait()
+
     # ------------------------------------------------------------------ #
     # lifecycle
     # ------------------------------------------------------------------ #
@@ -190,7 +210,7 @@ class SandboxController:
                     type(self._guest_channel).__name__,
                     self._guest_ready_timeout,
                 )
-                await self._guest_channel.wait_until_ready(timeout_s=self._guest_ready_timeout)
+                await self._call_wait_until_ready()
             else:
                 await self._step(
                     "wait_for_guest_ready",
@@ -202,17 +222,22 @@ class SandboxController:
                     ),
                 )
                 self._state = SandboxState.AGENT_HANDSHAKE
-                if self._guest_channel is not None:
-                    await self._guest_channel.verify_tools()
 
-                # Apply profile persona if specified
-                if getattr(self, "vm_profile", None) and self.vm_profile != "bare_control":
-                    try:
-                        from adam.sandbox.vbox.profile_applier import load_profile, apply_profile_persona
-                        profile = load_profile(f"win10_x64_{self.vm_profile}")
-                        await apply_profile_persona(self._guest_channel, profile)
-                    except Exception as e:
-                        logger.warning("Failed to apply profile persona: %s", e)
+            # Verify tools for BOTH backends, after readiness and before
+            # persona application. HTTPGuestChannel.verify_tools() caches a
+            # successful /health probe, so the orchestrator's later call is
+            # cheap and idempotent.
+            if self._guest_channel is not None:
+                await self._guest_channel.verify_tools()
+
+            # Apply profile persona if specified
+            if getattr(self, "vm_profile", None) and self.vm_profile != "bare_control":
+                try:
+                    from adam.sandbox.vbox.profile_applier import load_profile, apply_profile_persona
+                    profile = load_profile(f"win10_x64_{self.vm_profile}")
+                    await apply_profile_persona(self._guest_channel, profile)
+                except Exception as e:
+                    logger.warning("Failed to apply profile persona: %s", e)
 
         except Exception as exc:
             try:
@@ -387,6 +412,22 @@ class SandboxController:
             "apply_mutation() is not yet implemented -- awaiting the "
             "Deception Engine (ARCHITECTURE.md section 5.6, Dev C). "
         )
+
+    async def reset_network_redirect(self) -> None:
+        """
+        Best-effort guest proxy/hosts cleanup before the VM is powered off.
+
+        Delegates to the guest channel when it supports network redirects;
+        a no-op for the VBox compatibility backend.  Never raises, because it
+        runs in session teardown and must not mask the original failure.
+        """
+        reset = getattr(self._guest_channel, "reset_network_redirect", None)
+        if reset is None:
+            return
+        try:
+            await reset()
+        except Exception:
+            logger.exception("controller: guest network redirect cleanup failed")
 
     async def teardown(self) -> None:
         """

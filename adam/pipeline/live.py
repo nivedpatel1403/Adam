@@ -75,19 +75,58 @@ class LiveFusionBridge:
             self._idx += 1
             intent, tactic, technique = map_detection_to_intent(detection)
             first_ev = detection.evidence[0] if detection.evidence else None
-            pid = first_ev.process_id if (first_ev and first_ev.process_id) else 1000
-            pname = first_ev.process_name if (first_ev and first_ev.process_name) else "unknown.exe"
+            payloads = [ev.payload for ev in detection.evidence if isinstance(ev.payload, dict)]
+            pid = first_ev.process_id if (first_ev and first_ev.process_id) else 0
+            image = None
+            guid = None
+            if first_ev:
+                payload = first_ev.payload or {}
+                image = payload.get("Image") or first_ev.process_name
+                guid = payload.get("ProcessGuid")
+            image = str(image) if image else None
+            guid = str(guid) if guid else None
 
             ts = detection.timestamp
             if ts.tzinfo is None:
                 ts = ts.replace(tzinfo=timezone.utc)
 
-            features = {"file_count": len(detection.evidence), "has_target": True}
-            if intent == "RECON_DOMAIN_CONTROLLER":
-                features["ldap_attempts"] = 3
-                features["all_failed"] = True
-            elif intent == "PERSIST_RUN_KEY":
-                features["distinct_registry_keys"] = 6
+            target_object = next(
+                (
+                    payload.get("TargetFilename") or payload.get("TargetObject")
+                    for payload in payloads
+                    if payload.get("TargetFilename") or payload.get("TargetObject")
+                ),
+                None,
+            )
+            network_endpoint = None
+            for payload in payloads:
+                if payload.get("network_endpoint"):
+                    network_endpoint = str(payload["network_endpoint"])
+                    break
+                destination_ip = payload.get("DestinationIp") or payload.get("dest_ip")
+                if destination_ip:
+                    port = payload.get("DestinationPort") or payload.get("dest_port")
+                    network_endpoint = (
+                        f"{destination_ip}:{port}" if port else str(destination_ip)
+                    )
+                    break
+                query_name = payload.get("QueryName") or payload.get("domain")
+                if query_name:
+                    network_endpoint = str(query_name)
+                    break
+
+            features = {"file_count": len(detection.evidence)}
+            registry_keys = {
+                str(payload["TargetObject"])
+                for payload in payloads
+                if payload.get("TargetObject")
+            }
+            if registry_keys:
+                features["distinct_registry_keys"] = len(registry_keys)
+            if target_object:
+                features["target_object"] = target_object
+            if network_endpoint:
+                features["network_endpoint"] = network_endpoint
 
             se = SemanticEvent(
                 semantic_id=f"sem_fusion_{self._idx:03d}",
@@ -98,7 +137,7 @@ class LiveFusionBridge:
                 severity=detection.severity,
                 window_start=ts,
                 window_end=ts,
-                actor=Actor(pid=pid, image=f"C:\\Windows\\System32\\{pname}", guid=f"{{guid-fusion-{self._idx:04d}}}"),
+                actor=Actor(pid=pid, image=image, guid=guid),
                 evidence=[ev.process_name for ev in detection.evidence if ev.process_name],
                 attck=AttckRef(tactic=tactic, technique=technique),
                 detector=f"{detection.category}Detector@1.0",

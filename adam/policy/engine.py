@@ -55,6 +55,12 @@ class PolicyEngine(IPolicyEngine):
                 params.setdefault("target", str(event.actor.pid))
             if event.actor and event.actor.image:
                 params.setdefault("process_name", event.actor.image)
+            endpoint = event.features.get("network_endpoint")
+            if endpoint:
+                # Bind network-response primitives to the endpoint actually
+                # observed in this event instead of a hardcoded C2 URL.
+                params.setdefault("target_url", endpoint)
+                params.setdefault("c2_url", endpoint)
 
             decision = PolicyDecision(
                 decision_id=f"dec_{uuid.uuid4().hex[:12]}",

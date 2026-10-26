@@ -294,6 +294,26 @@ logger = logging.getLogger(__name__)
 _POWERSHELL_PATH = "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"
 
 
+def required_missing_tools(
+    *,
+    procmon_available: bool,
+    tshark_available: bool,
+    sysmon_log_available: bool,
+    tools_required: bool,
+) -> tuple[str, ...]:
+    """Return the stable, de-duplicated required-tool failure list."""
+    if not tools_required:
+        return ()
+    missing: list[str] = []
+    if not procmon_available:
+        missing.append("procmon")
+    if not tshark_available:
+        missing.append("tshark")
+    if not sysmon_log_available:
+        missing.append("sysmon")
+    return tuple(dict.fromkeys(missing))
+
+
 @dataclass(frozen=True, slots=True)
 class ToolAvailability:
     """verify_tools()'s report. `detail` maps tool name -> human-readable unavailability reason (absent key = available)."""
@@ -302,6 +322,9 @@ class ToolAvailability:
     tshark_available: bool
     sysmon_log_available: bool
     detail: dict[str, str]
+    # Stable, de-duplicated names of required tools that are unavailable.
+    # Empty when tools_required is false or everything required is present.
+    required_missing: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -725,6 +748,12 @@ class GuestAgent:
             tshark_available=tshark_available,
             sysmon_log_available=sysmon_log_available,
             detail=detail,
+            required_missing=required_missing_tools(
+                procmon_available=procmon_available,
+                tshark_available=tshark_available,
+                sysmon_log_available=sysmon_log_available,
+                tools_required=self._settings.tools_required,
+            ),
         )
 
     # ------------------------------------------------------------------ #

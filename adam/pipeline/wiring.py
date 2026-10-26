@@ -41,8 +41,8 @@ import asyncio
 import logging
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from typing import Awaitable, Callable
+from datetime import datetime, timedelta, timezone
+from typing import Any, Awaitable, Callable
 
 from adam.common.bus import EventBus, Subscription
 from adam.contracts.envelope import Envelope
@@ -74,6 +74,9 @@ class EngineHandles:
     decisions_total: int = 0
     decisions_executed: int = 0
     mutations_applied: int = 0
+    semantic_events_post_mutation: int = 0
+    # session_id -> [(mutation_id, applied_at, causal_window_ms)]
+    applied_mutations: dict[str, list[tuple[str, datetime, int]]] = field(default_factory=dict)
 
     def delivered(self, name: str) -> int:
         for subscription in self.subscriptions:
@@ -86,6 +89,46 @@ async def _default_dry_run(_session_id: str) -> bool:
     return True
 
 
+def _payloads(evidence: list[FusionRawEvent]) -> list[dict[str, Any]]:
+    return [event.payload for event in evidence if isinstance(event.payload, dict)]
+
+
+def _network_endpoint(payloads: list[dict[str, Any]]) -> str | None:
+    for payload in payloads:
+        # Already-normalised producers (replay fixtures, future collectors)
+        # can supply the endpoint directly.
+        if payload.get("network_endpoint"):
+            return str(payload["network_endpoint"])
+        # Sysmon keys and the synthetic/replay generator's lowercase keys
+        # are both observed telemetry, not fabricated defaults.
+        destination_ip = payload.get("DestinationIp") or payload.get("dest_ip")
+        if destination_ip:
+            port = payload.get("DestinationPort") or payload.get("dest_port")
+            return f"{destination_ip}:{port}" if port else str(destination_ip)
+        query_name = payload.get("QueryName") or payload.get("domain")
+        if query_name:
+            return str(query_name)
+    return None
+
+
+def _caused_by_mutation(
+    handles: EngineHandles,
+    session_id: str,
+    at: datetime,
+) -> str | None:
+    entries = handles.applied_mutations.get(session_id)
+    if not entries:
+        return None
+    if at.tzinfo is None:
+        at = at.replace(tzinfo=timezone.utc)
+    for mutation_id, applied_at, window_ms in reversed(entries):
+        if applied_at.tzinfo is None:
+            applied_at = applied_at.replace(tzinfo=timezone.utc)
+        if applied_at <= at <= applied_at + timedelta(milliseconds=window_ms):
+            return mutation_id
+    return None
+
+
 def wire_engines(
     bus: EventBus,
     *,
@@ -94,6 +137,7 @@ def wire_engines(
     deception: DeceptionEngine,
     session_contexts: dict[str, SessionContext] | None = None,
     resolve_dry_run: Callable[[str], Awaitable[bool | None]] | None = None,
+    causal_window_ms: int = 30_000,
 ) -> EngineHandles:
     """
     Subscribe fusion_raw / policy_semantic / deception_decision onto `bus`.
@@ -145,44 +189,74 @@ def wire_engines(
         for idx, detection in enumerate(result.detections, start=1):
             intent, tactic, technique = map_detection_to_intent(detection)
             first_ev = detection.evidence[0] if detection.evidence else None
-            pid = first_ev.process_id if (first_ev and first_ev.process_id) else 1000
-            pname = first_ev.process_name if (first_ev and first_ev.process_name) else "unknown.exe"
+            payloads = _payloads(detection.evidence)
+
+            pid = first_ev.process_id if (first_ev and first_ev.process_id) else 0
+            image = None
+            guid = None
+            if first_ev:
+                payload = first_ev.payload or {}
+                image = payload.get("Image") or first_ev.process_name
+                guid = payload.get("ProcessGuid")
+            image = str(image) if image else None
+            guid = str(guid) if guid else None
 
             dts = detection.timestamp
             if dts.tzinfo is None:
                 dts = dts.replace(tzinfo=timezone.utc)
 
-            features = {"file_count": len(detection.evidence), "has_target": True}
-            if first_ev:
-                if first_ev.payload and "TargetFilename" in first_ev.payload:
-                    features["target_object"] = first_ev.payload["TargetFilename"]
-                elif first_ev.payload and "TargetObject" in first_ev.payload:
-                    features["target_object"] = first_ev.payload["TargetObject"]
-                elif first_ev.payload and "DestinationIp" in first_ev.payload:
-                    features["network_endpoint"] = f"{first_ev.payload.get('DestinationIp')}:{first_ev.payload.get('DestinationPort', '')}"
-                elif first_ev.payload and "QueryName" in first_ev.payload:
-                    features["network_endpoint"] = first_ev.payload["QueryName"]
+            target_object = next(
+                (
+                    payload.get("TargetFilename") or payload.get("TargetObject")
+                    for payload in payloads
+                    if payload.get("TargetFilename") or payload.get("TargetObject")
+                ),
+                None,
+            )
+            network_endpoint = _network_endpoint(payloads)
+            registry_keys = {
+                str(payload["TargetObject"])
+                for payload in payloads
+                if payload.get("TargetObject")
+            }
 
-            if intent == "RECON_DOMAIN_CONTROLLER":
-                features["ldap_attempts"] = 3
-                features["all_failed"] = True
-            elif intent == "PERSIST_RUN_KEY":
-                features["distinct_registry_keys"] = 6
+            features: dict[str, Any] = {"file_count": len(detection.evidence)}
+            if registry_keys:
+                features["distinct_registry_keys"] = len(registry_keys)
+            if target_object:
+                features["target_object"] = target_object
+            if network_endpoint:
+                features["network_endpoint"] = network_endpoint
+            if not target_object and not network_endpoint:
+                logger.debug(
+                    "semantic event intent=%s has no target/network feature in %d evidence record(s)",
+                    intent,
+                    len(detection.evidence),
+                )
+
+            caused_by = _caused_by_mutation(
+                handles, env.session_id, datetime.now(timezone.utc)
+            )
+            if caused_by is not None:
+                handles.semantic_events_post_mutation += 1
 
             se = SemanticEvent(
                 semantic_id=f"sem_{uuid.uuid4().hex[:8]}_{idx:03d}",
                 session_id=env.session_id,
                 correlation_id=env.correlation_id,
                 intent=intent,
-                confidence=max(detection.confidence, 0.8),
+                # Never inflate a detector's confidence; policy gates on the
+                # real value.
+                confidence=detection.confidence,
                 severity=detection.severity,
                 window_start=dts,
                 window_end=dts,
-                actor=Actor(pid=pid, image=f"C:\\Windows\\System32\\{pname}", guid=f"{{guid-{uuid.uuid4().hex[:8]}}}"),
+                actor=Actor(pid=pid, image=image, guid=guid),
                 evidence=[e.process_name for e in detection.evidence if e.process_name],
                 attck=AttckRef(tactic=tactic, technique=technique),
                 detector=f"{detection.category}Detector@1.0",
                 features=features,
+                caused_by_mutation=caused_by,
             )
 
             s_env = Envelope[SemanticEvent](
@@ -246,6 +320,9 @@ def wire_engines(
                 mutation = await deception.execute_async(decision)
                 if mutation.status == MutationStatus.APPLIED:
                     handles.mutations_applied += 1
+                    handles.applied_mutations.setdefault(env.session_id, []).append(
+                        (mutation.mutation_id, mutation.applied_at, causal_window_ms)
+                    )
                     logger.info(
                         "[DeceptionEngine] decision=%s action=%s mutation=%s APPLIED successfully (latency=%.2fms)",
                         decision.decision_id, decision.action, mutation.mutation_id, mutation.latency_ms,
@@ -283,4 +360,5 @@ def wire_engines(
         bus.subscribe(RawEvent, handle_raw_event, name="fusion_raw", queue_size=10000),
         bus.subscribe(SemanticEvent, handle_semantic_event, name="policy_semantic", queue_size=50000),
     ]
+    handles.subscriptions.extend(subscriptions)
     return handles

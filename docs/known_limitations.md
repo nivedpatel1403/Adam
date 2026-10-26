@@ -5,13 +5,14 @@ This document lists the known architectural and operational limitations of the A
 ---
 
 ### 1. `FABRICATE_C2_RESPONSE` & `NETWORK`-Kind Mutations
-- **Status**: **RESOLVED**
+- **Status**: **PARTIAL — bounded HTTP lure proxy (not transparent MITM)**
 - **Root Cause**: The guest-resident HTTP agent (`adam_agent.ps1` / `HTTPGuestChannel`) executes mutations in-guest (filesystem, registry, processes) and cannot intercept or forge network packets from within the guest.
-- **Resolution**: Implemented host-side network interception via `adam.sandbox.network.NetworkInterceptor`.
-  - Added `NetworkInterceptor` (`adam/sandbox/network/interceptor.py`) to manage C2 response fabrication and SMB share redirection on the host.
-  - Updated `HTTPGuestChannel` to accept an optional `network_interceptor` and delegate `NETWORK` kind mutations (`RESPOND`, `UNRESPOND`, `MOUNT`, `UNMOUNT`) to it.
-  - Updated `adam/orchestrator/runner.py` to construct and inject `NetworkInterceptor` when running HTTP guest backend.
-  - Added unit test suite in `tests/unit/test_network_interceptor.py`.
+- **Resolution**:
+  - `NetworkInterceptor` is a real host-side HTTP server that serves registered fabricated responses and returns `404`/`501` for everything else. It does not forward unmatched traffic.
+  - `HTTPGuestChannel` configures the guest's WinINET/WinHTTP proxy once per session and optionally adds a marked hosts entry. Proxy configuration requires an administrator guest context; already-running clients may cache their old proxy.
+  - `Runner` starts the interceptor before VM arming and stops it in `finally`, including on failure. Control sessions do not start it.
+  - **Not covered**: HTTPS/`CONNECT` (returns `501`), raw sockets, non-HTTP protocols, pinned TLS, and clients that ignore the system proxy. SMB shares are registry-only; no real share or drive mapping is created.
+  - See [`docs/network-interception.md`](./network-interception.md) for the exact transport and limitations.
 
 ---
 
@@ -38,12 +39,12 @@ This document lists the known architectural and operational limitations of the A
 ---
 
 ### 4. Synthetic Nature of `/simulate` API and Benchmark CLI
-- **Status**: **RESOLVED (Real-Engine Hybrid Replay)**
-- **Root Cause**: `benchmark.py` hardcoded synthetic yield values (`ctrl_yield = 0.40`, `trt_yield = 0.85`), bypassing the real Fusion, Policy, and Deception engines.
+- **Status**: **PARTIAL — real engines wired; yield/plausibility still derived heuristics**
+- **Root Cause**: `benchmark.py` originally hardcoded synthetic yield values (`ctrl_yield = 0.40`, `trt_yield = 0.85`), bypassing the real Fusion, Policy, and Deception engines.
 - **Resolution**:
-  - Rewrote `adam/cli/benchmark.py` to wire `EventBus`, `EventFusionEngine`, `PolicyEngine`, and `DeceptionEngine` via `wire_engines()` for both Control (`dry_run=True`) and Treatment (`dry_run=False`) arms.
-  - Benchmark now derives empirical paired yields, event counts, decision counts, and primitive plausibility metrics directly from pipeline executions.
-  - Enhanced `/simulate` endpoint in `adam/api/main.py` with proper database commits and bus drain synchronization.
+  - `adam/cli/benchmark.py` now wires `EventBus`, `EventFusionEngine`, `PolicyEngine`, and `DeceptionEngine` via `wire_engines()` for both Control (`dry_run=True`) and Treatment (`dry_run=False`) arms.
+  - Event counts, decision counts, and primitive plausibility records are read from real pipeline executions.
+  - **Still heuristic**: `yield_score` is a formula over mutation/semantic counts, and an empty-corpus plausibility fallback still exists. Neither is a measured exploitation metric. Phase 5 of the remediation plan replaces these with an honest measurement methodology.
   - Added integration test `tests/integration/test_benchmark_real_engines.py` verifying real engine execution, input-sensitive metrics, and treatment yield advantage.
 
 

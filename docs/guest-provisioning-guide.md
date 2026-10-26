@@ -57,6 +57,7 @@ VBoxManage snapshot "Windows" take "disk-resized-36gb-c-drive"
 
 If you cannot immediately update the guest snapshot, ADAM handles missing tools gracefully:
 
-1. **Non-blocking verification**: `HTTPGuestChannel.verify_tools()` logs warnings for missing tools instead of raising exceptions.
+1. **Non-blocking verification**: `HTTPGuestChannel.verify_tools()` and `GuestAgent.verify_tools()` return a `ToolAvailability` report and log warnings instead of raising exceptions.
 2. **Skipping inactive collectors**: `start_captures()` inspects the cached `tool_availability` and skips capture requests for uninstalled tools.
-3. **Strict mode option**: Setting `tools_required = true` in `config/default.toml` under `[guest_tools]` or `[http_guest]` enforces that missing tools will fail fast if required for strict environments.
+3. **Strict mode option**: Setting `tools_required = true` in `config/default.toml` under `[guest_tools]` (VBox backend) or `[http_guest]` (HTTP backend) makes the session fail **before arming the VM or executing the sample**. The orchestrator checks the report's `required_missing` tuple immediately after `verify_tools()` and before `arm()`, `start_captures()`, or `detonate()`. `tools_required = false` (the default) logs the missing tools and continues.
+4. **Checked tools**: both backends check the configured Procmon path, tshark path, and Sysmon event-log channel. A tool whose path is unconfigured is reported unavailable; in strict mode that counts as a missing required tool.

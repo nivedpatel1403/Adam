@@ -36,9 +36,15 @@ from adam.deception.primitives.registry_lures import PlantDecoyRunKey
 async def test_fabricate_c2_response():
     channel = AsyncMock()
     prim = FabricateC2Response(channel)
-    mut = await prim.apply_async("sess", "corr", "dec", {})
+    mut = await prim.apply_async(
+        "sess",
+        "corr",
+        "dec",
+        {"target_url": "http://198.51.100.7:8080/beacon"},
+    )
     assert mut.status == MutationStatus.APPLIED
     assert len(mut.changes) == 1
+    assert mut.changes[0].target == "http://198.51.100.7:8080/beacon"
     
     rev = await prim.revert_async(mut)
     assert rev.status == MutationStatus.REVERTED
@@ -103,11 +109,20 @@ async def test_mount_fake_network_share():
     prim = MountFakeNetworkShare(channel)
     mut = await prim.apply_async("sess", "corr", "dec", {})
     assert mut.status == MutationStatus.APPLIED
-    assert len(mut.changes) == 2
-    
+    assert len(mut.changes) == 6
+    registry = {c.target: c for c in mut.changes if c.kind.value == "REGISTRY"}
+    assert registry[r"HKCU\Network\Z\RemotePath"].value == r"\\Server\Share"
+    assert registry[r"HKCU\Network\Z\ProviderName"].value == "Microsoft Windows Network"
+    assert registry[r"HKCU\Network\Z\ConnectionType"].value == "1"
+    assert registry[r"HKCU\Network\Z\ConnectionType"].value_type == "DWord"
+    assert registry[r"HKCU\Network\Z\UserName"].value == r"CORP\analyst"
+    assert registry[r"HKCU\Network\Z\DeferFlags"].value == "4"
+    assert registry[r"HKCU\Network\Z\DeferFlags"].value_type == "DWord"
+
     rev = await prim.revert_async(mut)
     assert rev.status == MutationStatus.REVERTED
-    assert channel.apply_mutation.call_count == 4
+    # Six apply calls + five value deletes + one key delete + one unmount.
+    assert channel.apply_mutation.call_count == 13
 
 @pytest.mark.asyncio
 async def test_hide_vm_artifacts():

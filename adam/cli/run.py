@@ -35,7 +35,7 @@ import typer
 from pydantic import ValidationError
 from rich.console import Console
 
-from adam.contracts.enums import SessionStatus
+from adam.contracts.enums import Arm, SessionStatus
 from adam.contracts.session import AnalysisSession
 from adam.orchestrator.runner import Runner
 
@@ -163,6 +163,16 @@ def run(
         "-p",
         help="Hardware profile ID to apply to the sandbox (e.g. bare_control, developer_decoy, enterprise_office_decoy).",
     ),
+    arm: Optional[str] = typer.Option(
+        None,
+        "--arm",
+        help="Experimental arm: 'control' or 'treatment'. Defaults to [deception] enabled.",
+    ),
+    deception: Optional[bool] = typer.Option(
+        None,
+        "--deception/--no-deception",
+        help="Override deception enablement for this run (control/treatment is derived from it).",
+    ),
 ) -> None:
     """Run one full, unattended analysis session against SAMPLE_PATH."""
     if verbose:
@@ -188,6 +198,16 @@ def run(
         console.print(f"[red]error:[/red] sample not found: {sample_path}")
         raise typer.Exit(code=2)
 
+    requested_arm: Arm | None = None
+    if arm is not None:
+        try:
+            requested_arm = Arm(arm.strip().lower())
+        except ValueError:
+            console.print(
+                f"[red]error:[/red] invalid --arm {arm!r}; expected 'control' or 'treatment'"
+            )
+            raise typer.Exit(code=2) from None
+
     runner = Runner()
 
     try:
@@ -199,6 +219,8 @@ def run(
             network_ek_json_path=network_ek_json_path,
             artifacts_dir=artifacts_dir,
             headless=not gui,
+            arm=requested_arm,
+            deception_enabled=deception,
         )
         session = _run_with_graceful_cancellation(coro)
     except ValidationError as exc:

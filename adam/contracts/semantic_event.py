@@ -18,8 +18,10 @@ from pydantic import BaseModel, Field
 
 class Actor(BaseModel):
     pid: int
-    image: str
-    guid: str
+    # Optional because the live Sysmon payload may not carry an Image or
+    # ProcessGuid for every event type.  Never synthesize a System32 path.
+    image: Optional[str] = None
+    guid: Optional[str] = None
 
 
 class AttckRef(BaseModel):

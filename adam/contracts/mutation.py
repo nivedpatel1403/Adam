@@ -24,6 +24,9 @@ class Change(BaseModel):
     target: str
     operation: str  # e.g. "SET", "CREATE", "RESPOND"
     value: Optional[str] = None
+    # Optional registry value type ("String", "DWord", ...).  None keeps the
+    # historical String default for callers that do not care.
+    value_type: Optional[str] = None
 
 
 class MutationResult(BaseModel):

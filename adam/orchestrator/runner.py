@@ -47,6 +47,7 @@ silently clobbered by a fresh capture.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
 import logging
@@ -69,6 +70,7 @@ from adam.db.repositories.sqlite import (
 )
 from adam.deception.engine import DeceptionEngine
 from adam.fusion.engine import EventFusionEngine
+from adam.orchestrator.experiment import resolve_experiment
 from adam.orchestrator.session import SessionOrchestrator, build_collectors_from_telemetry, new_session_id
 from adam.pipeline.wiring import wire_engines
 from adam.policy.engine import PolicyEngine
@@ -77,9 +79,18 @@ from adam.sandbox.guest.agent.agent import GuestAgent, TelemetryArtifacts
 from adam.sandbox.guest.channel import GuestChannel
 from adam.sandbox.guest.http_channel import HTTPGuestChannel
 from adam.sandbox.guest.vbox_channel import VBoxGuestChannel
+from adam.sandbox.network.interceptor import NetworkInterceptor
 from adam.sandbox.vbox.client import VirtualBoxClient
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class GuestRuntime:
+    """The guest channel plus any host-side resource that needs a lifecycle."""
+
+    channel: GuestChannel
+    interceptor: NetworkInterceptor | None = None
 
 
 def sample_ref_from_path(host_sample_path: str) -> SampleRef:
@@ -146,7 +157,13 @@ class Runner:
             ),
         )
 
-    def _build_guest_channel(self, client: VirtualBoxClient, settings: Settings) -> GuestChannel:
+    def _build_guest_channel(
+        self,
+        client: VirtualBoxClient,
+        settings: Settings,
+        *,
+        deception_enabled: bool = True,
+    ) -> GuestRuntime:
         """
         Backend selection, driven entirely by `settings.guest_backend`
         (adam/common/config.py). This is the ONE place in the codebase
@@ -169,16 +186,20 @@ class Runner:
             logger.info(
                 "guest_backend=http -- using HTTPGuestChannel against %s", http_settings.base_url
             )
-            from adam.sandbox.network.interceptor import NetworkInterceptor
-            interceptor = NetworkInterceptor()
-            return HTTPGuestChannel(
+            interceptor = NetworkInterceptor(
+                host=settings.network.host,
+                port=settings.network.port,
+                host_ip=settings.network.host_ip,
+                max_request_log=settings.network.max_request_log,
+            )
+            channel = HTTPGuestChannel(
                 http_settings.base_url,
                 capture_dir=http_settings.capture_dir,
                 procmon_path=http_settings.procmon_path,
                 tshark_path=http_settings.tshark_path,
                 sysmon_log=http_settings.sysmon_log,
                 tshark_interface=http_settings.tshark_interface,
-                auth_token=getattr(http_settings, "auth_token", "Adam_Sandbox_SecOps_2026!"),
+                auth_token=http_settings.auth_token,
                 request_timeout_s=http_settings.request_timeout_s,
                 # Same setting SandboxController already uses for VM-level
                 # wait_for_guest_ready() (see the `controller = ...`
@@ -189,7 +210,14 @@ class Runner:
                 # the VM-level one it always runs after.
                 guest_ready_timeout_s=settings.sandbox.guest_ready_timeout_s,
                 network_interceptor=interceptor,
+                network_redirect_enabled=http_settings.network_redirect_enabled,
+                hosts_redirect_enabled=http_settings.hosts_redirect_enabled,
+                proxy_url=http_settings.proxy_url or None,
+                proxy_bypass=http_settings.proxy_bypass,
+                smb_enabled=settings.network.smb_enabled,
+                tools_required=http_settings.tools_required,
             )
+            return GuestRuntime(channel=channel, interceptor=interceptor)
 
         logger.info("guest_backend=vbox -- using VBoxGuestChannel (compatibility backend)")
         guest_agent = GuestAgent(
@@ -207,8 +235,9 @@ class Runner:
         # would crash with a bare AttributeError at mutation time. Fail fast
         # here at startup (per ARCHITECTURE.md section 14.2 "refuse to
         # start") rather than deferring an opaque error to first mutation.
-        if not hasattr(channel, "apply_mutation") or not callable(
-            getattr(channel, "apply_mutation", None)
+        if deception_enabled and (
+            not hasattr(channel, "apply_mutation")
+            or not callable(getattr(channel, "apply_mutation", None))
         ):
             raise ConfigError(
                 "guest_backend=vbox does not support deception mutations; "
@@ -217,7 +246,7 @@ class Runner:
                 "builds an HTTPGuestChannel) to enable live deception "
                 "mutations, or disable deception for vbox sessions."
             )
-        return channel
+        return GuestRuntime(channel=channel)
 
     async def run(
         self,
@@ -229,6 +258,8 @@ class Runner:
         network_ek_json_path: str | None = None,
         artifacts_dir: str | Path = "artifacts",
         headless: bool = True,
+        arm: Arm | None = None,
+        deception_enabled: bool | None = None,
     ) -> AnalysisSession:
         """
         Loads (and thereby validates -- fail-fast) Settings, builds the
@@ -239,6 +270,17 @@ class Runner:
         them (Phase 5).
         """
         settings = self._resolve_settings()
+        experiment = resolve_experiment(
+            settings,
+            arm=arm,
+            deception_enabled=deception_enabled,
+        )
+        logger.info(
+            "experiment resolved: arm=%s deception_enabled=%s dry_run=%s",
+            experiment.arm.value,
+            experiment.deception_enabled,
+            experiment.dry_run,
+        )
         sample = sample_ref_from_path(host_sample_path)
         session_id = new_session_id()
 
@@ -265,7 +307,12 @@ class Runner:
         # only the resulting GuestChannel object (adam/sandbox/guest/
         # channel.py's whole reason for existing).
         client = VirtualBoxClient()
-        guest_channel = self._build_guest_channel(client, settings)
+        runtime = self._build_guest_channel(
+            client,
+            settings,
+            deception_enabled=experiment.deception_enabled,
+        )
+        guest_channel = runtime.channel
 
         controller = SandboxController(
             client,
@@ -289,7 +336,7 @@ class Runner:
         # in raw.jsonl, while metadata, semantic events, decisions, and mutations
         # are stored in SQLite).
         async def _live_dry_run(_session_id: str) -> bool:
-            return False
+            return experiment.dry_run
 
         self._engine_handles = wire_engines(
             bus,
@@ -297,6 +344,27 @@ class Runner:
             policy=PolicyEngine("rules/default"),
             deception=DeceptionEngine(guest_channel),
             resolve_dry_run=_live_dry_run,
+            causal_window_ms=settings.deception.causal_window_ms,
+        )
+
+        # Record initial session metadata before opening the DB connection so
+        # the finally block below always has a valid metadata object, even if
+        # SQLite initialization fails.
+        metadata = AnalysisSession(
+            session_id=session_id,
+            experiment_id=f"exp_{session_id}",
+            arm=experiment.arm,
+            sample=sample,
+            config=SessionConfig(
+                deception_enabled=experiment.deception_enabled,
+                policy_ruleset=experiment.policy_ruleset,
+                vm_profile=vm_profile or settings.sandbox.vm_name,
+                timeout_seconds=300,
+                network_mode=NetworkMode.HOST_ONLY,
+            ),
+            status=SessionStatus.RUNNING,
+            started_at=datetime.now(timezone.utc),
+            metrics=SessionMetrics(),
         )
 
         db_conn = None
@@ -317,23 +385,6 @@ class Runner:
             )
             db_writer.start()
 
-            # Record initial session metadata
-            metadata = AnalysisSession(
-                session_id=session_id,
-                experiment_id=f"exp_{session_id}",
-                arm=Arm.TREATMENT if getattr(settings.deception, "enable_clock_manipulation", True) else Arm.CONTROL,
-                sample=sample,
-                config=SessionConfig(
-                    deception_enabled=getattr(settings.deception, "enable_clock_manipulation", True),
-                    policy_ruleset="default",
-                    vm_profile=vm_profile or settings.sandbox.vm_name,
-                    timeout_seconds=300.0,
-                    network_mode=NetworkMode.HOST_ONLY,
-                ),
-                status=SessionStatus.RUNNING,
-                started_at=datetime.now(timezone.utc),
-                metrics=SessionMetrics(),
-            )
             await session_repo.create(metadata)
             await db_conn.commit()
         except Exception:
@@ -345,40 +396,86 @@ class Runner:
             bus_drain_timeout=120.0,
         )
 
+        session: AnalysisSession | None = None
         try:
+            if runtime.interceptor is not None:
+                if experiment.deception_enabled:
+                    await runtime.interceptor.start()
+                    logger.info(
+                        "session=%s network interceptor active on %s:%s (proxy_url=%s)",
+                        session_id,
+                        runtime.interceptor.host,
+                        runtime.interceptor.bound_port,
+                        runtime.interceptor.proxy_url,
+                    )
+                else:
+                    logger.info(
+                        "session=%s CONTROL arm: network interceptor not started",
+                        session_id,
+                    )
             session = await orchestrator.run_session(
                 sample,
                 settings,
                 host_sample_path=host_sample_path,
                 session_id=session_id,
+                arm=experiment.arm,
+                deception_enabled=experiment.deception_enabled,
+            )
+            session.metrics.raw_events = self._engine_handles.delivered("fusion_raw")
+            session.metrics.semantic_events = self._engine_handles.delivered("policy_semantic")
+            session.metrics.decisions_total = self._engine_handles.decisions_total
+            session.metrics.decisions_executed = self._engine_handles.decisions_executed
+            session.metrics.mutations_applied = self._engine_handles.mutations_applied
+            session.metrics.semantic_events_post_mutation = (
+                self._engine_handles.semantic_events_post_mutation
             )
         finally:
+            if runtime.interceptor is not None and runtime.interceptor.is_active:
+                try:
+                    await runtime.interceptor.stop()
+                    logger.info("session=%s network interceptor stopped", session_id)
+                except Exception:
+                    logger.exception("session=%s error stopping network interceptor", session_id)
+            aclose = getattr(runtime.channel, "aclose", None)
+            if aclose is not None:
+                try:
+                    await aclose()
+                except Exception:
+                    logger.exception("session=%s error closing guest channel", session_id)
             if db_writer:
                 try:
                     await db_writer.flush()
                     await db_writer.stop()
                 except Exception:
                     logger.exception("session=%s error stopping DBWriter", session_id)
-            if db_conn and session_repo:
+            if db_conn is not None:
                 try:
-                    # Update final status in DB
-                    final_session = AnalysisSession(
-                        session_id=session_id,
-                        experiment_id=f"exp_{session_id}",
-                        arm=metadata.arm,
-                        sample=sample,
-                        config=metadata.config,
-                        status=session.status if 'session' in locals() else SessionStatus.FAILED,
-                        started_at=session.started_at if 'session' in locals() else metadata.started_at,
-                        ended_at=session.ended_at if 'session' in locals() else datetime.now(timezone.utc),
-                        metrics=session.metrics if 'session' in locals() else SessionMetrics(),
-                        error=session.error if 'session' in locals() else None,
-                    )
-                    await session_repo.update(final_session)
-                    await db_conn.commit()
-                    await db_conn.close()
+                    if session_repo is not None:
+                        # Update final status in DB
+                        final_session = AnalysisSession(
+                            session_id=session_id,
+                            experiment_id=f"exp_{session_id}",
+                            arm=metadata.arm,
+                            sample=sample,
+                            config=metadata.config,
+                            status=session.status if session is not None else SessionStatus.FAILED,
+                            started_at=session.started_at if session is not None else metadata.started_at,
+                            ended_at=session.ended_at if session is not None else datetime.now(timezone.utc),
+                            metrics=session.metrics if session is not None else SessionMetrics(),
+                            error=session.error if session is not None else None,
+                        )
+                        await session_repo.update(final_session)
+                        await db_conn.commit()
                 except Exception:
                     logger.exception("session=%s error updating final session status in DB", session_id)
+                finally:
+                    # Always release the aiosqlite worker thread, even if the
+                    # final UPDATE failed; otherwise the test process (and a
+                    # real CLI invocation) can hang on interpreter shutdown.
+                    try:
+                        await db_conn.close()
+                    except Exception:
+                        logger.exception("session=%s error closing SQLite connection", session_id)
 
         for sub in self._engine_handles.subscriptions:
             logger.info(

@@ -99,6 +99,26 @@ _EVENT_ID_CATEGORY: dict[int, Category] = {
 _DEFAULT_CATEGORY = Category.SYSTEM
 
 
+def category_for_sysmon_event(event_id: int) -> Category:
+    """
+    Return the canonical RawEvent.category for a Sysmon EventID.
+
+    This is the single mapping shared by the offline EVTX parser and the
+    live Sysmon poller. Unknown IDs are SYSTEM, never NETWORK -- treating
+    every non-process event as network telemetry silently mislabels file,
+    registry, and DNS events.
+    """
+    category = _EVENT_ID_CATEGORY.get(event_id)
+    if category is None:
+        logger.warning(
+            "unmapped Sysmon EventID=%d, defaulting category to %s",
+            event_id,
+            _DEFAULT_CATEGORY.value,
+        )
+        return _DEFAULT_CATEGORY
+    return category
+
+
 class SysmonParseError(Exception):
     """
     Raised when a Sysmon XML record is too malformed to produce a RawEvent
@@ -190,10 +210,7 @@ def parse_sysmon_event_xml(
     record_id_el = system.find(f"{_NS}EventRecordID")
     source_event_id = int(record_id_el.text.strip()) if record_id_el is not None and record_id_el.text else event_id
 
-    category = _EVENT_ID_CATEGORY.get(event_id)
-    if category is None:
-        logger.warning("unmapped Sysmon EventID=%d, defaulting category to %s", event_id, _DEFAULT_CATEGORY.value)
-        category = _DEFAULT_CATEGORY
+    category = category_for_sysmon_event(event_id)
 
     data_elements: dict[str, str] = {}
     event_data = root.find(f"{_NS}EventData")

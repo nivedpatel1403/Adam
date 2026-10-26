@@ -49,9 +49,30 @@ class CommandAndControlDetector(BaseDetector):
 
     SCORE_THRESHOLD = 6
 
+    SUSPICIOUS_DNS_PREFIXES = ("c2.", "beacon.", "callback.")
+    SUSPICIOUS_DNS_SUFFIXES = (".xyz", ".top", ".tk", ".ru")
+
+    @classmethod
+    def _suspicious_dns(cls, event: RawEvent) -> bool:
+        payload = event.payload or {}
+        query = str(payload.get("QueryName", "")).strip().lower().rstrip(".")
+        if not query:
+            return False
+        return query.startswith(cls.SUSPICIOUS_DNS_PREFIXES) or query.endswith(
+            cls.SUSPICIOUS_DNS_SUFFIXES
+        )
+
     def match(self, events: list[RawEvent]) -> list[RawEvent] | None:
 
         score, matched = self.score_events(events)
+
+        # Sysmon EventID 22 (DNSEvent) has no command line, so a
+        # C2-looking QueryName would otherwise never reach the threshold.
+        for event in events:
+            if self._suspicious_dns(event):
+                if event not in matched:
+                    matched.append(event)
+                score += self.SCORE_THRESHOLD
 
         if score >= self.SCORE_THRESHOLD:
             return matched

@@ -1,12 +1,15 @@
 import asyncio
 import base64
 import hashlib
-import json
+import os
+
 import httpx
 
 async def main():
-    headers = {"X-Adam-Token": "Adam_Sandbox_SecOps_2026!"}
-    async with httpx.AsyncClient(base_url="http://192.168.19.102:8765", timeout=25.0, headers=headers) as client:
+    token = os.environ.get("ADAM_HTTP_GUEST_AUTH_TOKEN", "")
+    base_url = os.environ.get("ADAM_HTTP_GUEST_BASE_URL", "http://127.0.0.1:8765")
+    headers = {"X-Adam-Token": token} if token else {}
+    async with httpx.AsyncClient(base_url=base_url, timeout=25.0, headers=headers) as client:
         # 1. Health
         r = await client.get("/health")
         print("1. /health:", r.status_code, r.json())

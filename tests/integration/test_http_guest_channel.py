@@ -711,6 +711,12 @@ async def test_sandbox_controller_arm_and_detonate_fallback_on_unreachable(tmp_p
     def _unreachable_handler(request: httpx.Request) -> httpx.Response:
         if request.url.path in ("/sample/stage", "/process/start"):
             raise httpx.ConnectError("connection refused", request=request)
+        if request.url.path == "/health":
+            return _envelope({"status": "ok", "uptime_s": 1.0})
+        if request.url.path == "/filesystem/exists":
+            return _envelope({"exists": True, "is_directory": False, "size_bytes": 1})
+        if request.url.path == "/sysmon/diagnostics":
+            return _envelope({"channel_available": True, "event_count": 1})
         return _envelope({"status": "ok"})
 
     transport = httpx.MockTransport(_unreachable_handler)

@@ -60,16 +60,19 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import ipaddress
 import logging
+import re
 import time
 from pathlib import Path, PureWindowsPath
 from typing import Any, TypeVar
+from urllib.parse import urlsplit
 
 import httpx
 from pydantic import BaseModel
 
 from adam.common.errors import GuestTimeoutError
-from adam.sandbox.guest.agent.agent import TelemetryArtifacts, ToolAvailability
+from adam.sandbox.guest.agent.agent import TelemetryArtifacts, ToolAvailability, required_missing_tools
 from adam.sandbox.guest.http_models import (
     BackingFileData,
     ErrorCode,
@@ -119,6 +122,19 @@ logger = logging.getLogger(__name__)
 
 _ModelT = TypeVar("_ModelT", bound=BaseModel)
 
+_POWERSHELL_PATH = "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"
+_HOSTS_PATH = "C:\\Windows\\System32\\drivers\\etc\\hosts"
+_HOSTS_MARKER = "# ADAM-LURE"
+
+
+def _ps_quote(value: str) -> str:
+    """Single-quote a value for a PowerShell script (safe with -EncodedCommand)."""
+    return "'" + value.replace("'", "''") + "'"
+
+
+def _encode_powershell(script: str) -> str:
+    return base64.b64encode(script.encode("utf-16-le")).decode("ascii")
+
 # Transport-level errors worth a short retry -- the guest agent momentarily
 # unreachable (a Scheduled Task restart per install.ps1's RestartCount, a
 # brief host-only-adapter network hiccup) is a real, expected class of
@@ -156,6 +172,12 @@ class HTTPGuestChannel:
         readiness_poll_interval_s: float = 1.0,
         client: httpx.AsyncClient | None = None,
         network_interceptor: Any | None = None,
+        network_redirect_enabled: bool = True,
+        hosts_redirect_enabled: bool = False,
+        proxy_url: str | None = None,
+        proxy_bypass: str = "localhost;127.0.0.1;<local>",
+        smb_enabled: bool = False,
+        tools_required: bool = False,
     ) -> None:
         """
         base_url: e.g. "http://192.168.56.101:8765" -- the guest's
@@ -207,6 +229,16 @@ class HTTPGuestChannel:
         self._retry_count = 0
         self._mutation_lock = asyncio.Lock()
         self._network_interceptor = network_interceptor
+        self._network_redirect_enabled = network_redirect_enabled
+        self._hosts_redirect_enabled = hosts_redirect_enabled
+        self._proxy_url_override = proxy_url or None
+        self._proxy_bypass = proxy_bypass
+        self._smb_enabled = smb_enabled
+        self._tools_required = tools_required
+        self._network_configured = False
+        self._proxy_configured = False
+        self._hosts_entries: dict[str, str] = {}
+        self._network_rules: set[str] = set()
         self._tool_availability: ToolAvailability | None = None
         headers = {"X-Adam-Token": auth_token} if auth_token else {}
         self._client = client or httpx.AsyncClient(base_url=self._base_url, timeout=request_timeout_s, headers=headers)
@@ -220,9 +252,215 @@ class HTTPGuestChannel:
     def retry_count(self) -> int:
         return self._retry_count
 
+    @property
+    def network_interceptor(self) -> Any | None:
+        return self._network_interceptor
+
+    @property
+    def network_configured(self) -> bool:
+        return self._network_configured
+
     async def aclose(self) -> None:
-        """Closes the underlying httpx client. Callers that inject their own `client` own its lifecycle instead."""
+        """Close the underlying httpx client. Redirect cleanup is separate."""
         await self._client.aclose()
+
+    # ------------------------------------------------------------------ #
+    # Network-lure redirect (Phase 2)
+    # ------------------------------------------------------------------ #
+
+    async def _run_powershell(
+        self,
+        script: str,
+        *,
+        label: str,
+        timeout_s: float = 60.0,
+    ) -> VMOperationResult:
+        """
+        Run a PowerShell script via -EncodedCommand.
+
+        Encoding the whole script as UTF-16LE Base64 avoids every layer of
+        cmd.exe/PowerShell quoting ambiguity for hostnames, paths, and proxy
+        values, including apostrophes.
+        """
+        return await self.run_process(
+            _POWERSHELL_PATH,
+            [
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-EncodedCommand",
+                _encode_powershell(script),
+            ],
+            wait=True,
+            timeout_s=timeout_s,
+        )
+
+    async def configure_http_proxy(
+        self,
+        proxy_url: str | None = None,
+        *,
+        bypass: str | None = None,
+    ) -> None:
+        """
+        Point the guest's WinINET (per-user) and WinHTTP (system) clients at
+        the host-side lure proxy.
+
+        Requires an administrator guest context.  Already-running processes
+        may cache their proxy settings; restart them after this call.
+        """
+        url = proxy_url or self._proxy_url_override
+        if not url and self._network_interceptor is not None:
+            url = getattr(self._network_interceptor, "proxy_url", None)
+        if not url:
+            raise RuntimeError("configure_http_proxy: no proxy URL available")
+
+        parsed = urlsplit(url)
+        if parsed.scheme.lower() != "http" or not parsed.hostname or parsed.port is None:
+            raise ValueError(
+                f"configure_http_proxy: expected http://host:port, got {url!r}"
+            )
+        proxy_server = f"{parsed.hostname}:{parsed.port}"
+        bypass_value = self._proxy_bypass if bypass is None else bypass
+
+        script = f"""$ErrorActionPreference = 'Stop'
+$key = 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings'
+New-Item -Path $key -Force | Out-Null
+New-ItemProperty -Path $key -Name ProxyEnable -Value 1 -PropertyType DWord -Force | Out-Null
+New-ItemProperty -Path $key -Name ProxyServer -Value {_ps_quote(url)} -PropertyType String -Force | Out-Null
+New-ItemProperty -Path $key -Name ProxyOverride -Value {_ps_quote(bypass_value)} -PropertyType String -Force | Out-Null
+$proxyServer = {_ps_quote(proxy_server)}
+$bypass = {_ps_quote(bypass_value)}
+& netsh.exe winhttp set proxy "proxy-server=$proxyServer" "bypass-list=$bypass"
+if ($LASTEXITCODE -ne 0) {{ throw "netsh winhttp set proxy failed with exit code $LASTEXITCODE" }}
+"""
+        result = await self._run_powershell(script, label="configure_http_proxy")
+        if result.return_code != 0:
+            detail = result.stderr.strip() or result.stdout.strip()
+            raise RuntimeError(
+                f"configure_http_proxy failed (rc={result.return_code}): {detail}"
+            )
+        self._proxy_configured = True
+        self._network_configured = True
+        logger.info("[HTTPGuestChannel] guest HTTP proxy set to %s", url)
+
+    async def reset_http_proxy(self) -> None:
+        """Disable the guest proxy and reset WinHTTP. Always best-effort."""
+        script = f"""$ErrorActionPreference = 'Continue'
+$key = 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings'
+if (Test-Path $key) {{
+  New-ItemProperty -Path $key -Name ProxyEnable -Value 0 -PropertyType DWord -Force | Out-Null
+}}
+& netsh.exe winhttp reset proxy | Out-Null
+if ($LASTEXITCODE -ne 0) {{ exit $LASTEXITCODE }}
+"""
+        try:
+            result = await self._run_powershell(script, label="reset_http_proxy", timeout_s=30.0)
+            if result.return_code != 0:
+                logger.warning(
+                    "[HTTPGuestChannel] reset_http_proxy returned rc=%s: %s",
+                    result.return_code,
+                    result.stderr.strip() or result.stdout.strip(),
+                )
+        except Exception as exc:  # noqa: BLE001 -- teardown must not mask the session error
+            logger.warning("[HTTPGuestChannel] reset_http_proxy failed: %s", exc)
+        finally:
+            self._proxy_configured = False
+            self._network_configured = False
+
+    async def add_hosts_entry(self, hostname: str, ip: str) -> None:
+        """Append a marked hosts entry (requires guest administrator rights)."""
+        hostname = hostname.strip()
+        if not hostname or re.search(r"[\s\r\n]", hostname):
+            raise ValueError(f"add_hosts_entry: invalid hostname {hostname!r}")
+        try:
+            ipaddress.ip_address(ip)
+        except ValueError as exc:
+            raise ValueError(f"add_hosts_entry: invalid IP address {ip!r}") from exc
+
+        script = f"""$ErrorActionPreference = 'Stop'
+$hostsPath = {_ps_quote(_HOSTS_PATH)}
+$marker = {_ps_quote(_HOSTS_MARKER)}
+$hostname = {_ps_quote(hostname)}
+$ip = {_ps_quote(ip)}
+$lines = @([System.IO.File]::ReadAllLines($hostsPath))
+$filtered = @($lines | Where-Object {{ -not ($_.Contains($hostname) -and $_.Contains($marker)) }})
+$entry = "$ip`t$hostname`t$marker"
+[System.IO.File]::WriteAllLines($hostsPath, @($filtered) + $entry, [System.Text.Encoding]::ASCII)
+"""
+        result = await self._run_powershell(script, label=f"add_hosts_entry: {hostname}")
+        if result.return_code != 0:
+            detail = result.stderr.strip() or result.stdout.strip()
+            raise RuntimeError(
+                f"add_hosts_entry failed (rc={result.return_code}): {detail}"
+            )
+        self._hosts_entries[hostname] = ip
+        logger.info("[HTTPGuestChannel] added hosts entry %s -> %s", hostname, ip)
+
+    async def remove_hosts_entry(self, hostname: str) -> None:
+        """Remove the marked hosts entry for ``hostname`` (best-effort)."""
+        hostname = hostname.strip()
+        if not hostname:
+            return
+        script = f"""$ErrorActionPreference = 'Continue'
+$hostsPath = {_ps_quote(_HOSTS_PATH)}
+$marker = {_ps_quote(_HOSTS_MARKER)}
+$hostname = {_ps_quote(hostname)}
+$lines = @([System.IO.File]::ReadAllLines($hostsPath))
+$filtered = @($lines | Where-Object {{ -not ($_.Contains($hostname) -and $_.Contains($marker)) }})
+[System.IO.File]::WriteAllLines($hostsPath, $filtered, [System.Text.Encoding]::ASCII)
+"""
+        try:
+            result = await self._run_powershell(script, label=f"remove_hosts_entry: {hostname}")
+            if result.return_code != 0:
+                logger.warning(
+                    "[HTTPGuestChannel] remove_hosts_entry rc=%s: %s",
+                    result.return_code,
+                    result.stderr.strip() or result.stdout.strip(),
+                )
+        except Exception as exc:  # noqa: BLE001 -- teardown best-effort
+            logger.warning("[HTTPGuestChannel] remove_hosts_entry failed: %s", exc)
+        finally:
+            self._hosts_entries.pop(hostname, None)
+
+    async def reset_network_redirect(self) -> None:
+        """Remove hosts entries and disable the proxy; safe to call repeatedly."""
+        for hostname in list(self._hosts_entries):
+            await self.remove_hosts_entry(hostname)
+        if self._proxy_configured or self._network_configured:
+            await self.reset_http_proxy()
+        self._network_rules.clear()
+        self._network_configured = False
+
+    async def _ensure_network_redirect(self, target_url: str) -> None:
+        if self._network_interceptor is None:
+            return
+        if not getattr(self._network_interceptor, "is_active", False):
+            logger.warning(
+                "[HTTPGuestChannel] network interceptor is not active; rule for %s "
+                "was registered but the guest proxy was not configured",
+                target_url,
+            )
+            return
+        if self._network_redirect_enabled and not self._network_configured:
+            await self.configure_http_proxy()
+        if self._hosts_redirect_enabled:
+            parsed_target = urlsplit(target_url)
+            proxy = self._proxy_url_override or getattr(
+                self._network_interceptor, "proxy_url", None
+            )
+            parsed_proxy = urlsplit(proxy) if proxy else None
+            if parsed_target.hostname and parsed_proxy and parsed_proxy.hostname:
+                await self.add_hosts_entry(parsed_target.hostname, parsed_proxy.hostname)
+                if parsed_proxy.port not in (80, None):
+                    logger.warning(
+                        "[HTTPGuestChannel] hosts redirect points %s at %s, but the "
+                        "lure proxy listens on port %s; clients using the original "
+                        "port will not reach it",
+                        parsed_target.hostname,
+                        parsed_proxy.hostname,
+                        parsed_proxy.port,
+                    )
 
     # ------------------------------------------------------------------ #
     # transport
@@ -466,7 +704,6 @@ class HTTPGuestChannel:
             if healthy:
                 elapsed = time.monotonic() - started
                 logger.info("guest_http: HTTP guest agent is healthy after %.1f seconds.", elapsed)
-                await asyncio.sleep(2.0)
                 self._ready = True
                 return
 
@@ -513,7 +750,16 @@ class HTTPGuestChannel:
             detail["agent"] = str(exc)
             logger.warning("guest_http: tool unavailable -- agent: %s", detail["agent"])
             return ToolAvailability(
-                procmon_available=False, tshark_available=False, sysmon_log_available=False, detail=detail
+                procmon_available=False,
+                tshark_available=False,
+                sysmon_log_available=False,
+                detail=detail,
+                required_missing=required_missing_tools(
+                    procmon_available=False,
+                    tshark_available=False,
+                    sysmon_log_available=False,
+                    tools_required=self._tools_required,
+                ),
             )
 
         procmon_available = False
@@ -553,6 +799,12 @@ class HTTPGuestChannel:
             tshark_available=tshark_available,
             sysmon_log_available=sysmon_log_available,
             detail=detail,
+            required_missing=required_missing_tools(
+                procmon_available=procmon_available,
+                tshark_available=tshark_available,
+                sysmon_log_available=sysmon_log_available,
+                tools_required=self._tools_required,
+            ),
         )
         return self._tool_availability
 
@@ -657,6 +909,12 @@ class HTTPGuestChannel:
         Polls guest agent GET /sysmon/events/since for Sysmon records with RecordId > record_id.
         Returns (last_record_id, list_of_records).
         """
+        parts = [part.strip() for part in event_ids.split(",") if part.strip()]
+        if not parts or any(not re.fullmatch(r"\d+", part) for part in parts):
+            raise ValueError(
+                f"get_sysmon_events_since: event_ids must be comma-separated integers, got {event_ids!r}"
+            )
+        event_ids = ",".join(str(int(part)) for part in parts)
         params: dict[str, Any] = {"record_id": record_id, "event_ids": event_ids}
         if channel:
             params["channel"] = channel
@@ -1033,7 +1291,15 @@ class HTTPGuestChannel:
             logger.warning("Failed to validate ProcessQueryData: %s", exc)
             return []
 
-    async def apply_mutation(self, kind: str, target: str, operation: str, value: str | None) -> None:
+    async def apply_mutation(
+        self,
+        kind: str,
+        target: str,
+        operation: str,
+        value: str | None,
+        *,
+        value_type: str | None = None,
+    ) -> None:
         """
         Apply a deception primitive mutation (file creation/deletion, registry setting)
         directly to the guest via HTTP agent / process execution.
@@ -1076,34 +1342,64 @@ class HTTPGuestChannel:
             elif "REGISTRY" in kind_upper:
                 if op_upper in ("SET", "MASK", "CREATE"):
                     val_text = value or ""
-                    cmd = (
+                    allowed_types = {
+                        "string": "String",
+                        "expandstring": "ExpandString",
+                        "dword": "DWord",
+                        "qword": "QWord",
+                        "binary": "Binary",
+                        "multistring": "MultiString",
+                    }
+                    prop_type = allowed_types.get((value_type or "String").lower(), "String")
+                    if prop_type in ("DWord", "QWord"):
+                        if not re.fullmatch(r"-?\d+", val_text.strip()):
+                            raise ValueError(
+                                f"REGISTRY SET {target}: {prop_type} value must be an integer, got {val_text!r}"
+                            )
+                        value_expr = val_text.strip()
+                    else:
+                        value_expr = _ps_quote(val_text)
+                    script = (
                         f"$regPath = 'Registry::{target}'; "
                         f"$parent = Split-Path -Parent $regPath; "
                         f"$name = Split-Path -Leaf $regPath; "
                         f"if (-not (Test-Path $parent)) {{ New-Item -Path $parent -Force | Out-Null }}; "
-                        f"New-ItemProperty -Path $parent -Name $name -Value '{val_text}' -PropertyType String -Force | Out-Null"
+                        f"New-ItemProperty -Path $parent -Name $name -Value {value_expr} "
+                        f"-PropertyType {prop_type} -Force | Out-Null"
                     )
-                    result = await self.run_process(
-                        "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
-                        ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", cmd],
-                        wait=True,
-                        timeout_s=60.0,
+                    result = await self._run_powershell(
+                        script, label=f"registry_set: {target}"
                     )
                     logger.info(
-                        "[HTTPGuestChannel] apply_mutation REGISTRY SET target=%s rc=%s stdout=%s stderr=%s",
-                        target, result.return_code if result else "N/A", result.stdout if result else "", result.stderr if result else "",
+                        "[HTTPGuestChannel] apply_mutation REGISTRY SET target=%s type=%s rc=%s stdout=%s stderr=%s",
+                        target, prop_type, result.return_code if result else "N/A", result.stdout if result else "", result.stderr if result else "",
                     )
                 elif op_upper in ("DELETE", "UNMASK"):
-                    cmd = f"$regPath = 'Registry::{target}'; if (Test-Path $regPath) {{ Remove-ItemProperty -Path (Split-Path -Parent $regPath) -Name (Split-Path -Leaf $regPath) -ErrorAction SilentlyContinue }}"
-                    result = await self.run_process(
-                        "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
-                        ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", cmd],
-                        wait=True,
-                        timeout_s=60.0,
+                    script = (
+                        f"$regPath = 'Registry::{target}'; "
+                        f"if (Test-Path $regPath) {{ "
+                        f"Remove-ItemProperty -Path (Split-Path -Parent $regPath) "
+                        f"-Name (Split-Path -Leaf $regPath) -ErrorAction SilentlyContinue }}"
+                    )
+                    result = await self._run_powershell(
+                        script, label=f"registry_delete: {target}"
                     )
                     logger.info(
                         "[HTTPGuestChannel] apply_mutation REGISTRY DELETE target=%s rc=%s stdout=%s stderr=%s",
                         target, result.return_code if result else "N/A", result.stdout if result else "", result.stderr if result else "",
+                    )
+                elif op_upper in ("DELETE_KEY", "REMOVE_KEY"):
+                    script = (
+                        f"$regPath = 'Registry::{target}'; "
+                        f"if (Test-Path $regPath) {{ "
+                        f"Remove-Item -Path $regPath -Recurse -Force }}"
+                    )
+                    result = await self._run_powershell(
+                        script, label=f"registry_delete_key: {target}"
+                    )
+                    logger.info(
+                        "[HTTPGuestChannel] apply_mutation REGISTRY DELETE_KEY target=%s rc=%s",
+                        target, result.return_code if result else "N/A",
                     )
             elif "PROCESS" in kind_upper:
                 if op_upper in ("CREATE", "SPAWN", "START"):
@@ -1145,15 +1441,27 @@ class HTTPGuestChannel:
                 if self._network_interceptor is not None:
                     if op_upper == "RESPOND":
                         await self._network_interceptor.respond(target, value)
+                        self._network_rules.add(target)
+                        await self._ensure_network_redirect(target)
                         logger.info("[HTTPGuestChannel] apply_mutation NETWORK RESPOND target=%s registered with interceptor", target)
                         return
                     elif op_upper == "UNRESPOND":
                         await self._network_interceptor.unrespond(target)
+                        self._network_rules.discard(target)
+                        if not self._network_rules:
+                            await self.reset_network_redirect()
                         logger.info("[HTTPGuestChannel] apply_mutation NETWORK UNRESPOND target=%s removed from interceptor", target)
                         return
                     elif op_upper == "MOUNT":
                         await self._network_interceptor.mount_share(target, value)
-                        logger.info("[HTTPGuestChannel] apply_mutation NETWORK MOUNT target=%s registered with interceptor", target)
+                        if self._smb_enabled:
+                            logger.warning(
+                                "[HTTPGuestChannel] NETWORK MOUNT target=%s requested with "
+                                "smb_enabled=true, but real SMB mapping is not implemented; "
+                                "the registry lure is the only applied change",
+                                target,
+                            )
+                        logger.info("[HTTPGuestChannel] apply_mutation NETWORK MOUNT target=%s registered as registry-only lure", target)
                         return
                     elif op_upper == "UNMOUNT":
                         await self._network_interceptor.unmount_share(target)

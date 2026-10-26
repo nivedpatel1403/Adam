@@ -48,12 +48,13 @@ than SandboxController failing later with a confusing guest auth error.
 from __future__ import annotations
 
 import os
+import re
 import tomllib
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from pydantic_settings import (
     BaseSettings,
     PydanticBaseSettingsSource,
@@ -163,6 +164,9 @@ class HttpGuestSettings(BaseModel):
     host: str = "127.0.0.1"
     port: int = 8765
     request_timeout_s: float = Field(default=15.0, gt=0)
+    # Bearer token for the guest agent's X-Adam-Token header.  No default:
+    # set it in .env / config/<ADAM_ENV>.toml, never in committed defaults.
+    auth_token: str | None = None
 
     # Mirrors of GuestToolsSettings' path/log fields, used only for
     # HTTPGuestChannel's verify_tools()/start_captures() calls (which
@@ -179,9 +183,67 @@ class HttpGuestSettings(BaseModel):
     capture_dir: str = "C:\\ADAM\\telemetry"
     tools_required: bool = False
 
+    # Network-lure redirect (Phase 2).  The host-side interceptor serves
+    # fabricated HTTP responses; these settings decide whether the guest is
+    # told to use it.  Raw sockets, pinned TLS, and non-HTTP protocols remain
+    # out of scope -- see docs/network-interception.md.
+    network_redirect_enabled: bool = True
+    hosts_redirect_enabled: bool = False
+    proxy_url: str | None = None
+    proxy_bypass: str = "localhost;127.0.0.1;<local>"
+
     @property
     def base_url(self) -> str:
         return f"http://{self.host}:{self.port}"
+
+
+class NetworkSettings(BaseModel):
+    """Host-side bounded HTTP lure proxy configuration (Phase 2)."""
+
+    host: str = "127.0.0.1"
+    port: int = Field(default=0, ge=0, le=65535)
+    # Address the GUEST should use to reach the host (e.g. the host-only
+    # adapter's 192.168.56.1).  None means use `host` -- correct for tests and
+    # loopback-only runs, not for a guest on a host-only network.
+    host_ip: str | None = None
+    max_request_log: int = Field(default=1000, gt=0)
+    smb_enabled: bool = False
+
+
+class LiveSettings(BaseModel):
+    """Live Sysmon polling during detonation (Phase 3)."""
+
+    enabled: bool = True
+    sysmon_event_ids: str = "1,3,5,11,12,13,22"
+    poll_interval_s: float = Field(default=1.0, gt=0)
+    batch_size: int = Field(default=100, gt=0)
+    max_batches_per_cycle: int = Field(default=10, gt=0)
+
+    @field_validator("sysmon_event_ids")
+    @classmethod
+    def _validate_event_ids(cls, value: str) -> str:
+        """
+        Normalise a comma-separated Sysmon EventID list.
+
+        The value is embedded in a PowerShell XPath, so only digits and
+        commas are accepted -- no quotes, parentheses, or operators.
+        Duplicate IDs are removed while preserving the caller's order.
+        """
+        parts = [part.strip() for part in value.split(",") if part.strip()]
+        if not parts:
+            raise ValueError("live.sysmon_event_ids must contain at least one EventID")
+        seen: set[int] = set()
+        normalised: list[int] = []
+        for part in parts:
+            if not re.fullmatch(r"\d+", part):
+                raise ValueError(
+                    f"live.sysmon_event_ids must be comma-separated integers, got {part!r}"
+                )
+            event_id = int(part)
+            if event_id not in seen:
+                seen.add(event_id)
+                normalised.append(event_id)
+        return ",".join(str(event_id) for event_id in normalised)
 
 
 class DatabaseSettings(BaseModel):
@@ -198,7 +260,11 @@ class ReportingSettings(BaseModel):
     plausibility_warn_below: float = Field(default=0.5, ge=0.0, le=1.0)
 
 class DeceptionSettings(BaseModel):
-    default_causal_window_ms: int = Field(default=30000, gt=0)
+    # Master switch for the experimental arm.  This is deliberately separate
+    # from enable_clock_manipulation: the latter controls one primitive,
+    # not whether the treatment arm is allowed to execute deception at all.
+    enabled: bool = True
+    causal_window_ms: int = Field(default=30000, gt=0)
     enable_clock_manipulation: bool = False
 
 
@@ -290,6 +356,8 @@ class Settings(BaseSettings):
     # this setting or on which concrete class was chosen.
     guest_backend: Literal["vbox", "http"] = "vbox"
     http_guest: HttpGuestSettings = Field(default_factory=HttpGuestSettings)
+    network: NetworkSettings = Field(default_factory=NetworkSettings)
+    live: LiveSettings = Field(default_factory=LiveSettings)
     db: DatabaseSettings = Field(default_factory=DatabaseSettings)
     reporting: ReportingSettings = Field(default_factory=ReportingSettings)
     deception: DeceptionSettings = Field(default_factory=DeceptionSettings)

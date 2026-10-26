@@ -43,4 +43,4 @@ mypy>=1.16
 python-multipart>=0.0.32
 
 # Host-side network interception (NETWORK mutations)
-mitmproxy>=12.0.0
+aiohttp>=3.9,<4
