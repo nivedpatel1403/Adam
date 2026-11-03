@@ -1,0 +1,56 @@
+{
+  "build_id": "b4683c1bbdb8bd2f",
+  "created_utc": "2026-11-03T17:08:14.358051+00:00",
+  "file_count": 12,
+  "files": {
+    "adam_agent.ps1": {
+      "sha256": "549c40f7a413846ab1b753d65d4de9ce12d3231ae669292df418d54397503deb",
+      "size_bytes": 28390
+    },
+    "install.ps1": {
+      "sha256": "4c81e990f9864e47330a9a972d6c4dbdb9dc6d50275014c0d546101ffc940768",
+      "size_bytes": 23758
+    },
+    "modules/AgentConfig.psm1": {
+      "sha256": "241df0f7b2466fcb8039579072345bfebd0bb6748abcf2a14ba0c5a168598679",
+      "size_bytes": 2103
+    },
+    "modules/ArtifactManager.psm1": {
+      "sha256": "dea9633909b788397581be63ed14f0480b4e636dfd9c6b1431bfe47a494802ba",
+      "size_bytes": 5944
+    },
+    "modules/Common.psm1": {
+      "sha256": "4b0f62af0872ef52cb78256f55ea62972a48bf4af9bf44aa25f91ef0a2a3d226",
+      "size_bytes": 19668
+    },
+    "modules/DiagnosticsManager.psm1": {
+      "sha256": "cf97aedcd7bf37975606a24fb91a4c730e7234d4d4c7fb933782904532f0c3ac",
+      "size_bytes": 15842
+    },
+    "modules/FilesystemManager.psm1": {
+      "sha256": "7e7f572508e230d5bad22309586d27fb76c230454822d7388ffb8f82c456bc50",
+      "size_bytes": 7950
+    },
+    "modules/NetworkManager.psm1": {
+      "sha256": "c277d65c7ae7bbae33869aa0eff950bd93214b8ce2e6ee500a2c322c1d7d3b1a",
+      "size_bytes": 10822
+    },
+    "modules/ProcessManager.psm1": {
+      "sha256": "5f4b8c967073fb591fd148707de4f0ec72c8a817d77c1e401994c193cc2e2136",
+      "size_bytes": 6305
+    },
+    "modules/ProcmonManager.psm1": {
+      "sha256": "b3a4110194a5a02f93613043ebf413ba56fe1bd901ef73911338b3d87a79bc52",
+      "size_bytes": 6576
+    },
+    "modules/SampleManager.psm1": {
+      "sha256": "8586858b482fe7ebf4be576dbd0afa9857d395ef7868a8f91b024a3cb58b5c92",
+      "size_bytes": 5819
+    },
+    "modules/SysmonManager.psm1": {
+      "sha256": "4a2b3877404b2b629b32845d97323449d22a15caff4f6f1e6d4af030ae79188a",
+      "size_bytes": 9746
+    }
+  },
+  "version": "1.0.0"
+}

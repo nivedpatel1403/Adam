@@ -1,5 +1,5 @@
-import json
 from typing import Any
+
 
 class MarkdownRenderer:
     def render(self, data: dict[str, Any]) -> str:
@@ -40,4 +40,28 @@ class MarkdownRenderer:
                 else:
                     lines.append(f"- {t['time']} [MUTATION] {t['primitive']} (Status: {t.get('status')})")
                     
+            lines.append("## Telemetry Sources")
+            source_outcomes = data.get("source_outcomes", {})
+            if source_outcomes:
+                for src_name, src_info in source_outcomes.items():
+                    status = src_info.get("status", "UNKNOWN")
+                    cnt = src_info.get("events_count", 0)
+                    lines.append(f"- **{src_name}**: {status} ({cnt} events)")
+            else:
+                lines.append("- No telemetry source outcomes recorded.")
+
+            lines.append("## Failures / Errors")
+            failures = data.get("failures", [])
+            if failures:
+                for f in failures:
+                    f_type = f.get("type", "Error")
+                    detail = f.get("detail", "")
+                    prim = f.get("primitive")
+                    if prim:
+                        lines.append(f"- [{f_type}] ({prim}) {detail}")
+                    else:
+                        lines.append(f"- [{f_type}] {detail}")
+            else:
+                lines.append("- No failures recorded.")
+
         return "\n".join(lines)

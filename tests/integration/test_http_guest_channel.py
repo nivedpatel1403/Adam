@@ -46,11 +46,20 @@ class FakeGuestAgentServer:
     actually be "read back" by /filesystem/read.
     """
 
-    def __init__(self, *, procmon_present: bool = True, tshark_present: bool = True, sysmon_available: bool = True) -> None:
+    def __init__(
+        self,
+        *,
+        procmon_present: bool = True,
+        tshark_present: bool = True,
+        sysmon_available: bool = True,
+        process_queries_before_exit: int = 1,
+    ) -> None:
         self.calls: list[tuple[str, str]] = []
         self.procmon_present = procmon_present
         self.tshark_present = tshark_present
         self.sysmon_available = sysmon_available
+        self.process_queries_before_exit = process_queries_before_exit
+        self.process_query_count = 0
         self.files: dict[str, bytes] = {}
 
     def handler(self, request: httpx.Request) -> httpx.Response:
@@ -120,6 +129,24 @@ class FakeGuestAgentServer:
         if method == "POST" and path == "/process/start":
             exit_code = body.get("mock_exit_code", 0)
             return _envelope({"pid": 5555, "exit_code": exit_code, "stdout": "test_stdout\n", "stderr": ""})
+
+        if method == "GET" and path == "/process/query":
+            self.process_query_count += 1
+            query_pid = int(params.get("pid", 5555)) if params.get("pid") is not None else 5555
+            if self.process_query_count <= self.process_queries_before_exit:
+                return _envelope(
+                    {
+                        "processes": [
+                            {
+                                "pid": query_pid,
+                                "name": "smoke.exe",
+                                "command_line": "smoke.exe",
+                                "create_time": "2026-01-01T00:00:00Z",
+                            }
+                        ]
+                    }
+                )
+            return _envelope({"processes": []})
 
         if method == "GET" and path == "/filesystem/read":
             guest_path = params.get("path", "")
@@ -532,7 +559,6 @@ async def test_http_guest_channel_handles_401_unauthorized() -> None:
 async def test_stage_sample_success(tmp_path: Path) -> None:
     sample_file = tmp_path / "test_sample.exe"
     sample_file.write_bytes(b"\x90\x90\x90HELLO_TEST_PAYLOAD")
-    expected_sha256 = "657158784a0d9e871e84df94dfcb547f382103f6984e7ad18939b4bc063f25c7"
     import hashlib
     actual_expected_sha = hashlib.sha256(sample_file.read_bytes()).hexdigest()
 
@@ -643,6 +669,7 @@ async def test_run_process_crash_exit_code() -> None:
 
 async def test_sandbox_controller_arm_and_detonate_uses_http_channel(tmp_path: Path) -> None:
     from unittest.mock import AsyncMock, MagicMock
+
     from adam.contracts.session import SampleRef
     from adam.sandbox.controller import SandboxController
     from adam.sandbox.state import SandboxState
@@ -699,6 +726,7 @@ async def test_sandbox_controller_arm_and_detonate_uses_http_channel(tmp_path: P
 
 async def test_sandbox_controller_arm_and_detonate_fallback_on_unreachable(tmp_path: Path) -> None:
     from unittest.mock import AsyncMock, MagicMock
+
     from adam.contracts.session import SampleRef
     from adam.sandbox.controller import SandboxController
     from adam.sandbox.state import SandboxState
@@ -766,5 +794,245 @@ async def test_sandbox_controller_arm_and_detonate_fallback_on_unreachable(tmp_p
     # Fallback to run_in_guest was invoked
     mock_client.run_in_guest.assert_called_once()
     assert ctrl.last_detonation_result.stdout == "fallback_out"
+
+
+async def test_query_processes_raises_typed_errors() -> None:
+    from adam.common.errors import ContractViolationError
+    from adam.sandbox.guest.http_models import GuestAgentError, GuestAgentUnreachableError
+
+    # 1. Transport error -> GuestAgentUnreachableError
+    def _transport_err_handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("host unreachable", request=request)
+
+    transport = httpx.MockTransport(_transport_err_handler)
+    client = httpx.AsyncClient(transport=transport, base_url="http://fake:8765")
+    ch = HTTPGuestChannel("http://fake:8765", capture_dir="C:\\ADAM", procmon_path="p", tshark_path="t", sysmon_log="Sysmon", client=client)
+    with pytest.raises(GuestAgentUnreachableError, match="could not reach guest agent"):
+        await ch.query_processes(pid=123)
+
+    # 2. HTTP 500 error -> GuestAgentError
+    def _500_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, json={"success": False, "error_code": "INTERNAL_ERROR", "error_message": "crash", "data": None})
+
+    transport = httpx.MockTransport(_500_handler)
+    client = httpx.AsyncClient(transport=transport, base_url="http://fake:8765")
+    ch = HTTPGuestChannel("http://fake:8765", capture_dir="C:\\ADAM", procmon_path="p", tshark_path="t", sysmon_log="Sysmon", client=client)
+    with pytest.raises(GuestAgentError, match="INTERNAL_ERROR"):
+        await ch.query_processes(pid=123)
+
+    # 3. HTTP 401 Unauthorized -> GuestAgentError
+    def _401_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(401, json={"success": False, "error_code": "ACCESS_DENIED", "error_message": "bad token", "data": None})
+
+    transport = httpx.MockTransport(_401_handler)
+    client = httpx.AsyncClient(transport=transport, base_url="http://fake:8765")
+    ch = HTTPGuestChannel("http://fake:8765", capture_dir="C:\\ADAM", procmon_path="p", tshark_path="t", sysmon_log="Sysmon", client=client)
+    with pytest.raises(GuestAgentError, match="ACCESS_DENIED"):
+        await ch.query_processes(pid=123)
+
+    # 4. Unparseable JSON / schema violation -> ContractViolationError
+    def _invalid_json_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"NOT_JSON")
+
+    transport = httpx.MockTransport(_invalid_json_handler)
+    client = httpx.AsyncClient(transport=transport, base_url="http://fake:8765")
+    ch = HTTPGuestChannel("http://fake:8765", capture_dir="C:\\ADAM", procmon_path="p", tshark_path="t", sysmon_log="Sysmon", client=client)
+    with pytest.raises(ContractViolationError):
+        await ch.query_processes(pid=123)
+
+    # 5. Success 200 with 0 processes -> returns []
+    def _empty_handler(request: httpx.Request) -> httpx.Response:
+        return _envelope({"processes": []})
+
+    transport = httpx.MockTransport(_empty_handler)
+    client = httpx.AsyncClient(transport=transport, base_url="http://fake:8765")
+    ch = HTTPGuestChannel("http://fake:8765", capture_dir="C:\\ADAM", procmon_path="p", tshark_path="t", sysmon_log="Sysmon", client=client)
+    procs = await ch.query_processes(pid=123)
+    assert procs == []
+
+
+async def test_run_process_preserves_unknown_exit_code() -> None:
+    def _detached_handler(request: httpx.Request) -> httpx.Response:
+        return _envelope({"pid": 9999, "exit_code": None, "stdout": "", "stderr": ""})
+
+    transport = httpx.MockTransport(_detached_handler)
+    client = httpx.AsyncClient(transport=transport, base_url="http://fake:8765")
+    ch = HTTPGuestChannel("http://fake:8765", capture_dir="C:\\ADAM", procmon_path="p", tshark_path="t", sysmon_log="Sysmon", client=client)
+    res = await ch.run_process("C:\\sample.exe", wait=False)
+    assert res.return_code is None
+    assert res.success is False
+    assert res.pid == 9999
+
+
+async def test_get_sysmon_events_since_drains_multi_page_and_handles_log_reset() -> None:
+    page_count = 0
+
+    def _multi_page_handler(request: httpx.Request) -> httpx.Response:
+        nonlocal page_count
+        page_count += 1
+        record_id = int(request.url.params.get("record_id", 0))
+        if page_count == 1:
+            assert record_id == 0
+            # First page: 100 events, last_record_id = 100
+            events = [
+                {"record_id": i, "event_id": 1, "time_created": "2026-01-01T00:00:00Z", "data": {}}
+                for i in range(1, 101)
+            ]
+            return _envelope({"last_record_id": 100, "events": events, "log_reset": False})
+        else:
+            assert record_id == 100
+            # Second page: 25 events, last_record_id = 125, with log_reset signal
+            events = [
+                {"record_id": i, "event_id": 1, "time_created": "2026-01-01T00:00:00Z", "data": {}}
+                for i in range(101, 126)
+            ]
+            return _envelope({"last_record_id": 125, "events": events, "log_reset": True})
+
+    transport = httpx.MockTransport(_multi_page_handler)
+    client = httpx.AsyncClient(transport=transport, base_url="http://fake:8765")
+    ch = HTTPGuestChannel("http://fake:8765", capture_dir="C:\\ADAM", procmon_path="p", tshark_path="t", sysmon_log="Sysmon", client=client)
+
+    result = await ch.get_sysmon_events_since(record_id=0)
+    last_id, events = result
+    assert last_id == 125
+    assert len(events) == 125
+    assert getattr(result, "log_reset", False) is True
+
+
+def test_pcap_parser_preserves_http_urls() -> None:
+    from adam.collectors.parsers.pcap import parse_tshark_ek_line
+
+    ek_line = json.dumps({
+        "layers": {
+            "frame": {
+                "frame.number": "42",
+                "frame.time_epoch": "1762185600.0",
+                "frame.protocols": "eth:ip:tcp:http",
+                "frame.len": "256",
+            },
+            "ip": {
+                "ip.src": "192.168.19.10",
+                "ip.dst": "198.51.100.7",
+            },
+            "tcp": {
+                "tcp.srcport": "49152",
+                "tcp.dstport": "8080",
+            },
+            "http": {
+                "http.host": "c2.evil.com:8080",
+                "http.request.uri": "/beacon?id=123",
+                "http.request.full_uri": "http://c2.evil.com:8080/beacon?id=123",
+            },
+        }
+    })
+
+    event = parse_tshark_ek_line(ek_line, session_id="sess_001")
+    assert event is not None
+    assert event.attributes["http.request.full_uri"] == "http://c2.evil.com:8080/beacon?id=123"
+    assert event.attributes["http.host"] == "c2.evil.com:8080"
+    assert event.attributes["http.request.uri"] == "/beacon?id=123"
+    assert event.attributes["network_endpoint"] == "http://c2.evil.com:8080/beacon?id=123"
+
+
+async def test_session_orchestrator_unified_ingest_and_deduplication(tmp_path: Path) -> None:
+    from datetime import datetime, timezone
+    from unittest.mock import AsyncMock, MagicMock
+
+    from adam.common.bus import EventBus
+    from adam.contracts.enums import Category, Source
+    from adam.contracts.raw_event import RawEvent
+    from adam.orchestrator.persistence import RawEventWriter
+    from adam.orchestrator.session import SessionOrchestrator
+
+    bus = MagicMock(spec=EventBus)
+    bus.publish = AsyncMock()
+
+    raw_file = tmp_path / "raw.jsonl"
+    writer = RawEventWriter(raw_file)
+    await writer.open()
+
+    ctrl = MagicMock()
+    orchestrator = SessionOrchestrator(ctrl, bus, collectors=[])
+    orchestrator._session_id = "sess_test_1"
+
+    event1 = RawEvent(
+        event_id="raw_1",
+        session_id="sess_test_1",
+        source=Source.SYSMON,
+        source_event_id=101,
+        category=Category.PROCESS,
+        occurred_at=datetime.now(timezone.utc),
+        observed_at=datetime.now(timezone.utc),
+    )
+
+    # 1. Ingest event1 first time (live) -> Accepted
+    accepted1 = await orchestrator.ingest_raw_event(event1, writer, channel="sysmon", generation=0)
+    assert accepted1 is True
+    assert bus.publish.call_count == 1
+
+    # 2. Ingest duplicate event1 (offline replay with same source_event_id) -> Dropped
+    event1_offline = RawEvent(
+        event_id="raw_2_different_uuid",
+        session_id="sess_test_1",
+        source=Source.SYSMON,
+        source_event_id=101,
+        category=Category.PROCESS,
+        occurred_at=datetime.now(timezone.utc),
+        observed_at=datetime.now(timezone.utc),
+    )
+    accepted2 = await orchestrator.ingest_raw_event(event1_offline, writer, channel="sysmon", generation=0)
+    assert accepted2 is False
+    assert bus.publish.call_count == 1  # Not called again
+
+    # 3. Session ownership validation: wrong session_id raises ValueError
+    wrong_session_event = RawEvent(
+        event_id="raw_3",
+        session_id="sess_OTHER",
+        source=Source.SYSMON,
+        source_event_id=102,
+        category=Category.PROCESS,
+        occurred_at=datetime.now(timezone.utc),
+        observed_at=datetime.now(timezone.utc),
+    )
+    with pytest.raises(ValueError, match="session ownership"):
+        await orchestrator.ingest_raw_event(wrong_session_event, writer, channel="sysmon", generation=0)
+
+    await writer.close()
+    lines = raw_file.read_text(encoding="utf-8").strip().splitlines()
+    assert len(lines) == 1  # Exactly one line persisted to raw.jsonl
+
+
+async def test_sysmon_collector_filters_pre_session_watermark() -> None:
+    import asyncio
+
+    from adam.collectors.sysmon import SysmonCollector
+
+    collector = SysmonCollector("dummy.evtx", session_id="sess_watermark", watermark_record_id=100)
+
+    # Mock _read_current_records to return 5 records (record_ids 98, 99, 100, 101, 102)
+    fake_records = [
+        f"""<Event xmlns="http://schemas.microsoft.com/win/2004/08/events/event">
+            <System>
+                <EventID>1</EventID>
+                <EventRecordID>{rid}</EventRecordID>
+                <TimeCreated SystemTime="2026-01-01T00:00:00.000000000Z"/>
+            </System>
+        </Event>"""
+        for rid in [98, 99, 100, 101, 102]
+    ]
+
+    collector._read_current_records = lambda: fake_records  # type: ignore[assignment]
+    await collector.start()
+    await asyncio.sleep(0.05)
+    await collector.stop()
+
+    emitted = []
+    async for ev in collector.iter_events():
+        emitted.append(ev)
+
+    # Only records with EventRecordID > 100 (i.e. 101, 102) should be emitted
+    assert len(emitted) == 2
+    assert emitted[0].source_event_id == 101
+    assert emitted[1].source_event_id == 102
 
 

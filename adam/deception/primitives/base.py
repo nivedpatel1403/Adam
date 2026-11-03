@@ -67,15 +67,19 @@ class DeceptionPrimitive(IDeception, ABC):
         self, session_id: str, correlation_id: str, decision_id: str, parameters: dict[str, Any]
     ) -> MutationResult:
         start = time.perf_counter()
-        changes = await self._build_changes(parameters)
+        changes: list[Change] = []
 
         try:
+            changes = await self._build_changes(parameters)
             for change in changes:
                 await self._channel.apply_mutation(
                     change.kind.value, change.target, change.operation, change.value
                 )
             status = MutationStatus.APPLIED
             error = None
+        except ValueError as exc:
+            status = MutationStatus.SKIPPED
+            error = str(exc)
         except Exception as exc:  # noqa: BLE001 — isolation boundary (§14.3)
             status = MutationStatus.FAILED
             error = str(exc)
@@ -83,7 +87,7 @@ class DeceptionPrimitive(IDeception, ABC):
         score, notes = self._plausibility(parameters)
         latency_ms = (time.perf_counter() - start) * 1000
 
-        return MutationResult(
+        result = MutationResult(
             mutation_id=f"mut_{uuid.uuid4().hex[:12]}",
             session_id=session_id,
             correlation_id=correlation_id,
@@ -93,10 +97,13 @@ class DeceptionPrimitive(IDeception, ABC):
             latency_ms=latency_ms,
             changes=changes,
             plausibility_score=score,
-            plausibility_notes=notes,
-            revertible=True,
+            plausibility_notes=error if status == MutationStatus.SKIPPED else notes,
+            revertible=status == MutationStatus.APPLIED,
             error=error,
         )
+        if error:
+            object.__setattr__(result, "message", error)
+        return result
 
     def apply(self, parameters: dict[str, Any]) -> MutationResult:  # pragma: no cover
         raise NotImplementedError("Use apply_async — all guest ops are async (C5)")

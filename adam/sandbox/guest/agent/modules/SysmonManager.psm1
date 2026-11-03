@@ -96,24 +96,25 @@ function Get-SysmonEventsSince {
     )
     try {
         $wevtutil = Join-Path $env:WINDIR 'System32\wevtutil.exe'
+        $latestResult = Invoke-NativeProcess -FilePath $wevtutil -ArgumentList @('qe', $Channel, '/c:1', '/rd:true', '/f:xml') -TimeoutMs 5000
+        $currentMaxId = 0
+        if (-not $latestResult.TimedOut -and $latestResult.ExitCode -eq 0 -and (-not [string]::IsNullOrWhiteSpace($latestResult.StdOut))) {
+            try {
+                $xmlDoc = [xml]$latestResult.StdOut.Trim()
+                $currentMaxId = [long]$xmlDoc.Event.System.EventRecordID
+            } catch { }
+        }
+
         if ($RecordId -lt 0) {
-            $latestResult = Invoke-NativeProcess -FilePath $wevtutil -ArgumentList @('qe', $Channel, '/c:1', '/rd:true', '/f:xml') -TimeoutMs 5000
-            $latestId = 0
-            if (-not $latestResult.TimedOut -and $latestResult.ExitCode -eq 0 -and (-not [string]::IsNullOrWhiteSpace($latestResult.StdOut))) {
-                try {
-                    $xmlDoc = [xml]$latestResult.StdOut.Trim()
-                    $latestId = [int]$xmlDoc.Event.System.EventRecordID
-                } catch { }
-            }
             return New-SuccessEnvelope -Data @{
-                last_record_id = $latestId
-                events = @()
+                last_record_id = $currentMaxId
+                log_reset      = $false
+                events         = @()
             }
         }
 
-        # EventIds is interpolated into an XPath.  Reject anything that is
-        # not a plain integer rather than silently dropping the bad token
-        # (which would broaden the query to every Sysmon event).
+        # EventIds is interpolated into an XPath. Reject anything that is
+        # not a plain integer rather than silently dropping the bad token.
         $idParts = @()
         foreach ($id in $EventIds.Split(',')) {
             $trimmed = $id.Trim()
@@ -126,56 +127,85 @@ function Get-SysmonEventsSince {
             return New-ErrorEnvelope -ErrorCode $Script:ErrorCodes.InvalidArgument -ErrorMessage "EventIds must contain at least one EventID"
         }
         $idClause = "($($idParts -join ' or ')) and "
-        $xpath = "*[System[${idClause}EventRecordID > $RecordId]]"
 
-        $result = Invoke-NativeProcess -FilePath $wevtutil -ArgumentList @('qe', $Channel, "/q:$xpath", '/f:xml', '/c:100') -TimeoutMs 5000
-        if ($result.TimedOut -or $result.ExitCode -ne 0) {
-            return New-ErrorEnvelope -ErrorCode $Script:ErrorCodes.InternalError -ErrorMessage "wevtutil qe failed: $($result.StdErr)"
+        # Handle log reset: if current maximum record ID in the channel is less than requested ID,
+        # the log was cleared or reset. Signal log_reset = true and query from start.
+        $logReset = $false
+        $cursor = [long]$RecordId
+        if ($RecordId -gt 0 -and $currentMaxId -gt 0 -and $currentMaxId -lt $RecordId) {
+            $logReset = $true
+            $cursor = 0
         }
 
-        $rawXml = if ($result.StdOut) { $result.StdOut.Trim() } else { '' }
-        if ([string]::IsNullOrWhiteSpace($rawXml)) {
-            return New-SuccessEnvelope -Data @{
-                last_record_id = $RecordId
-                events = @()
-            }
-        }
-
-        $xmlDoc = [xml]"<Events>$rawXml</Events>"
+        # Multi-page draining loop: fetch batches of up to 100 records until channel is drained
         $events = @()
-        $maxRecordId = $RecordId
+        $maxRecordId = if ($logReset) { $currentMaxId } else { [long]$RecordId }
+        $batchSize = 100
+        $maxIterations = 500
 
-        $eventNodes = @($xmlDoc.Events.Event)
-        foreach ($eventNode in $eventNodes) {
-            $rId = [int]$eventNode.System.EventRecordID
-            $eId = [int]$eventNode.System.EventID
-            $timeCreated = [string]$eventNode.System.TimeCreated.SystemTime
-            if ($rId -gt $maxRecordId) {
-                $maxRecordId = $rId
+        for ($iter = 0; $iter -lt $maxIterations; $iter++) {
+            $xpath = "*[System[${idClause}EventRecordID > $cursor]]"
+            $result = Invoke-NativeProcess -FilePath $wevtutil -ArgumentList @('qe', $Channel, "/q:$xpath", '/f:xml', "/c:$batchSize") -TimeoutMs 10000
+            if ($result.TimedOut -or $result.ExitCode -ne 0) {
+                if ($events.Count -gt 0) {
+                    break
+                }
+                return New-ErrorEnvelope -ErrorCode $Script:ErrorCodes.InternalError -ErrorMessage "wevtutil qe failed: $($result.StdErr)"
             }
 
-            $dataDict = @{}
-            if ($eventNode.EventData) {
-                $items = @($eventNode.EventData.Data)
-                foreach ($item in $items) {
-                    if ($item -and $item.Name) {
-                        $val = [string]$item.InnerText
-                        $dataDict[$item.Name] = $val
+            $rawXml = if ($result.StdOut) { $result.StdOut.Trim() } else { '' }
+            if ([string]::IsNullOrWhiteSpace($rawXml)) {
+                break
+            }
+
+            $xmlDoc = [xml]"<Events>$rawXml</Events>"
+            $eventNodes = @($xmlDoc.Events.Event)
+            if ($eventNodes.Count -eq 0) {
+                break
+            }
+
+            $batchHighestId = $cursor
+            foreach ($eventNode in $eventNodes) {
+                $rId = [long]$eventNode.System.EventRecordID
+                $eId = [int]$eventNode.System.EventID
+                $timeCreated = [string]$eventNode.System.TimeCreated.SystemTime
+                if ($rId -gt $batchHighestId) {
+                    $batchHighestId = $rId
+                }
+
+                $dataDict = @{}
+                if ($eventNode.EventData) {
+                    $items = @($eventNode.EventData.Data)
+                    foreach ($item in $items) {
+                        if ($item -and $item.Name) {
+                            $val = [string]$item.InnerText
+                            $dataDict[$item.Name] = $val
+                        }
                     }
+                }
+
+                $events += @{
+                    record_id    = $rId
+                    event_id     = $eId
+                    time_created = $timeCreated
+                    data         = $dataDict
                 }
             }
 
-            $events += @{
-                record_id = $rId
-                event_id = $eId
-                time_created = $timeCreated
-                data = $dataDict
+            if ($batchHighestId -gt $maxRecordId) {
+                $maxRecordId = $batchHighestId
             }
+
+            if ($eventNodes.Count -lt $batchSize -or $batchHighestId -le $cursor) {
+                break
+            }
+            $cursor = $batchHighestId
         }
 
         return New-SuccessEnvelope -Data @{
-            last_record_id = $maxRecordId
-            events = $events
+            last_record_id = [long]$maxRecordId
+            log_reset      = [bool]$logReset
+            events         = $events
         }
     } catch {
         return New-ErrorEnvelope -ErrorCode $Script:ErrorCodes.InternalError -ErrorMessage $_.Exception.Message

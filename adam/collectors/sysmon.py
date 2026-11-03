@@ -62,12 +62,14 @@ class SysmonCollector(BaseCollector):
         session_id: str,
         poll_interval: float = 0.1,
         buffer_size: int = 10000,
+        watermark_record_id: int | None = None,
     ) -> None:
         super().__init__(buffer_size=buffer_size)
         self._evtx_path = evtx_path
         self._session_id = session_id
         self._poll_interval = poll_interval
-        self._last_record_id: int | None = None
+        self._watermark_record_id: int | None = watermark_record_id
+        self._last_record_id: int | None = watermark_record_id
 
     @property
     def source_name(self) -> str:
@@ -133,6 +135,12 @@ class SysmonCollector(BaseCollector):
                     logger.warning("source=%s skipping malformed record: %s", self.source_name, exc)
 
                 if event is not None:
+                    if (
+                        isinstance(event.source_event_id, int)
+                        and self._last_record_id is not None
+                        and event.source_event_id <= self._last_record_id
+                    ):
+                        continue
                     self._emit(event)
                     emitted_since_yield += 1
                     if emitted_since_yield >= 10:

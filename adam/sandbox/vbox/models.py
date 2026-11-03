@@ -54,9 +54,9 @@ class VMOperationResult:
     success: bool
     command: tuple[str, ...]
     duration_ms: float
-    return_code: int
-    stdout: str
-    stderr: str
+    return_code: int | None = None
+    stdout: str = ""
+    stderr: str = ""
     termination_reason: str | None = None
     pid: int | None = None
 

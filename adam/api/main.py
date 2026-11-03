@@ -3,40 +3,44 @@ adam/api/main.py
 FastAPI backend for ADAM Live Pipeline.
 """
 
-import asyncio
-import json
-import os
-from contextlib import asynccontextmanager
-from typing import Dict, List, Any
-from pathlib import Path
+from __future__ import annotations
 
-from fastapi import FastAPI, Request, UploadFile, File, BackgroundTasks
+import asyncio
+import hashlib
+import json
+import random
+from contextlib import asynccontextmanager
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
+
+from fastapi import BackgroundTasks, FastAPI, File, Request, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from fastapi.middleware.cors import CORSMiddleware
-import hashlib
-import random
-from datetime import datetime, timezone
 
-from adam.contracts.semantic_event import SemanticEvent
-from adam.contracts.policy_decision import PolicyDecision
-from adam.contracts.mutation import MutationResult
+from adam.contracts.enums import Arm, MutationStatus, NetworkMode, SessionStatus
 from adam.contracts.envelope import Envelope
+from adam.contracts.mutation import MutationResult
+from adam.contracts.policy_decision import PolicyDecision
 from adam.contracts.raw_event import RawEvent
+from adam.contracts.semantic_event import SemanticEvent
 from adam.contracts.session import AnalysisSession, SampleRef, SessionConfig, SessionMetrics
-from adam.contracts.enums import Arm, NetworkMode, SessionStatus
 from adam.fusion.log_generate import generate_attack_chain, generate_benign_events
+
+if TYPE_CHECKING:
+    from adam.pipeline.live import LiveOrchestrator
 
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 RULES_PATH = BASE_DIR / "rules" / "default"
 
 # In-memory store for sessions
-sessions_store: Dict[str, Any] = {}
+sessions_store: dict[str, Any] = {}
 
 # SSE Queues for connected clients
-clients: List[asyncio.Queue] = []
+clients: list[asyncio.Queue] = []
 
-orchestrator: LiveOrchestrator = None  # type: ignore
+orchestrator: LiveOrchestrator | None = None  # type: ignore
 
 async def store_event(envelope: Envelope):
     sess_id = envelope.session_id
@@ -61,10 +65,13 @@ async def store_event(envelope: Envelope):
             metadata.metrics.semantic_events += 1
         elif msg_type == "PolicyDecision":
             metadata.metrics.decisions_total += 1
-            if payload_dict.get("verdict") == "EXECUTE":
+            is_deception_enabled = getattr(metadata.config, "deception_enabled", True) and getattr(metadata, "arm", None) != Arm.CONTROL
+            if payload_dict.get("verdict") == "EXECUTE" and is_deception_enabled:
                 metadata.metrics.decisions_executed += 1
         elif msg_type == "MutationResult":
-            metadata.metrics.mutations_applied += 1
+            status = payload_dict.get("status")
+            if status in ("APPLIED", MutationStatus.APPLIED, getattr(MutationStatus.APPLIED, "value", "APPLIED")):
+                metadata.metrics.mutations_applied += 1
         
     # Broadcast to SSE
     sse_msg = f"event: {msg_type}\ndata: {payload_json}\n\n"
@@ -74,7 +81,7 @@ async def store_event(envelope: Envelope):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # We initialize the dependencies from deps.py
-    from adam.api.deps import init_dependencies, shutdown_dependencies, deps
+    from adam.api.deps import deps, init_dependencies, shutdown_dependencies
     
     await init_dependencies()
     
@@ -117,6 +124,7 @@ async def get_session_mutations(session_id: str):
 
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 
+
 @app.get("/api/v1/sessions/{session_id}/report")
 async def get_session_report(session_id: str, format: str = "json"):
     from adam.api.deps import deps
@@ -149,8 +157,9 @@ async def get_experiment_comparison(experiment_id: str):
         return JSONResponse(content={"error": str(e)}, status_code=500)
 
 async def run_deterministic_simulation(session_id: str, seed: int):
-    from adam.api.deps import deps
     import uuid
+
+    from adam.api.deps import deps
     metadata: AnalysisSession = sessions_store[session_id]["metadata"]
     
     # 1. Generate events deterministically
@@ -168,7 +177,7 @@ async def run_deterministic_simulation(session_id: str, seed: int):
     for ev in all_events:
         try:
             ts = datetime.fromisoformat(ev["timestamp"].replace("Z", "+00:00"))
-        except:
+        except Exception:
             ts = datetime.now(timezone.utc)
             
         from adam.contracts.raw_event import ProcessInfo
@@ -234,7 +243,7 @@ async def simulate_session(
     background_tasks: BackgroundTasks, 
     file: UploadFile = File(...),
     deception_enabled: bool = True,
-    experiment_id: str = None
+    experiment_id: str | None = None,
 ):
     content = await file.read()
     sha256 = hashlib.sha256(content).hexdigest()
@@ -276,8 +285,8 @@ async def simulate_session(
         "mutations": []
     }
     
+
     from adam.api.deps import deps
-    import asyncio
     
     async def create_and_run():
         await deps.session_repo.create(metadata)
@@ -339,5 +348,6 @@ async def sse_stream(request: Request):
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 from adam.dashboard.router import dashboard_router
+
 app.include_router(dashboard_router)
 app.mount("/dashboard/static", StaticFiles(directory=Path(__file__).parent.parent / "dashboard" / "static"), name="static")

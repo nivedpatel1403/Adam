@@ -341,6 +341,10 @@ if ($sourceRoot -ieq $resolvedInstallDir) {
     Write-Ok "Already running from the install directory ($resolvedInstallDir) -- skipping file copy"
 } else {
     Copy-Item -Path (Join-Path $sourceRoot 'adam_agent.ps1') -Destination $resolvedInstallDir -Force
+    $manifestSource = Join-Path $sourceRoot 'build_manifest.json'
+    if (Test-Path -LiteralPath $manifestSource) {
+        Copy-Item -Path $manifestSource -Destination $resolvedInstallDir -Force
+    }
 
     $destModules = Join-Path $resolvedInstallDir 'modules'
     if (Test-Path -LiteralPath $destModules) {
@@ -356,7 +360,7 @@ Write-Step 'Writing / merging configuration'
 $configPath = Join-Path $resolvedInstallDir 'agent.config.json'
 $defaultConfig = [ordered]@{
     ListenPrefix = "http://+:$Port/"
-    ProcmonPath  = 'C:\Users\Admin\Downloads\ProcessMonitor\Procmon64.exe'
+    ProcmonPath  = 'C:\ADAM\Tools\Procmon\Procmon64.exe'
     TsharkPath   = 'C:\Program Files\Wireshark\tshark.exe'
     SysmonLog    = 'Microsoft-Windows-Sysmon/Operational'
     CaptureDir   = 'C:\ADAM\telemetry'
@@ -375,6 +379,9 @@ if (-not (Test-Path -LiteralPath $configPath)) {
         $changed = $false
         foreach ($key in $defaultConfig.Keys) {
             if (-not $existingHash.Contains($key)) {
+                $existingHash[$key] = $defaultConfig[$key]
+                $changed = $true
+            } elseif ($key -eq 'ProcmonPath' -and $existingHash[$key] -like '*ProcessMonitor*Procmon64.exe' -and (-not (Test-Path -LiteralPath $existingHash[$key]))) {
                 $existingHash[$key] = $defaultConfig[$key]
                 $changed = $true
             }

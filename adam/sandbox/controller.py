@@ -55,12 +55,14 @@ import asyncio
 import inspect
 import logging
 import time
-from typing import Coroutine, Any
+from collections.abc import Coroutine
+from typing import Any
 
+from adam.common.errors import ContractViolationError
 from adam.contracts.interfaces import MutationRequest, MutationResult
 from adam.contracts.session import SampleRef
 from adam.sandbox.guest.channel import GuestChannel
-from adam.sandbox.guest.http_models import GuestAgentUnreachableError
+from adam.sandbox.guest.http_models import GuestAgentError, GuestAgentUnreachableError
 from adam.sandbox.state import SandboxOperationError, SandboxState, SandboxStateError
 from adam.sandbox.vbox.client import VBoxCommandError, VirtualBoxClient
 from adam.sandbox.vbox.models import VMOperationResult
@@ -130,7 +132,7 @@ class SandboxController:
             raise SandboxStateError(self._state, operation, expected)
 
     @staticmethod
-    async def _step(operation: str, coro: "Coroutine[Any, Any, VMOperationResult]") -> VMOperationResult:
+    async def _step(operation: str, coro: Coroutine[Any, Any, VMOperationResult]) -> VMOperationResult:
         try:
             result = await coro
         except VBoxCommandError as exc:
@@ -345,14 +347,17 @@ class SandboxController:
                         if target_pid is not None and hasattr(self._guest_channel, "query_processes"):
                             try:
                                 procs = await self._guest_channel.query_processes(pid=target_pid)
-                                if not procs:
+                                if procs == []:
                                     logger.info(
                                         "session sample PID=%s exited / was terminated after %.2fs",
                                         target_pid, time.monotonic() - detonate_start,
                                     )
                                     break
-                            except Exception:
-                                pass
+                            except (GuestAgentError, GuestAgentUnreachableError, ContractViolationError) as exc:
+                                logger.debug(
+                                    "transient error querying process pid=%s during detonation wait, continuing to poll: %s",
+                                    target_pid, exc,
+                                )
                 except GuestAgentUnreachableError as exc:
                     logger.warning(
                         "HTTP guest agent unreachable during detonate(), falling back to guestcontrol run: %s",

@@ -69,9 +69,9 @@ from typing import Any, TypeVar
 from urllib.parse import urlsplit
 
 import httpx
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
-from adam.common.errors import GuestTimeoutError
+from adam.common.errors import ContractViolationError, GuestTimeoutError
 from adam.sandbox.guest.agent.agent import TelemetryArtifacts, ToolAvailability, required_missing_tools
 from adam.sandbox.guest.http_models import (
     BackingFileData,
@@ -116,6 +116,26 @@ class StageResult(BaseModel):
     target_path: str
     sha256: str
     size_bytes: int
+
+
+class SysmonEventsResult(tuple):
+    """
+    Result of get_sysmon_events_since. Unpacks as (last_record_id, events)
+    for backwards compatibility with 2-tuple callers, while also exposing
+    last_record_id, events, and log_reset as attributes.
+    """
+
+    last_record_id: int
+    events: list[SysmonRecordItem]
+    log_reset: bool
+
+    def __new__(cls, last_record_id: int, events: list[SysmonRecordItem], log_reset: bool = False):
+        return super().__new__(cls, (last_record_id, events))
+
+    def __init__(self, last_record_id: int, events: list[SysmonRecordItem], log_reset: bool = False):
+        self.last_record_id = last_record_id
+        self.events = events
+        self.log_reset = log_reset
 
 
 logger = logging.getLogger(__name__)
@@ -907,7 +927,8 @@ $filtered = @($lines | Where-Object {{ -not ($_.Contains($hostname) -and $_.Cont
     ) -> tuple[int, list[SysmonRecordItem]]:
         """
         Polls guest agent GET /sysmon/events/since for Sysmon records with RecordId > record_id.
-        Returns (last_record_id, list_of_records).
+        Drains batches >100 records and captures log_reset flag.
+        Returns SysmonEventsResult(last_record_id, list_of_records, log_reset).
         """
         parts = [part.strip() for part in event_ids.split(",") if part.strip()]
         if not parts or any(not re.fullmatch(r"\d+", part) for part in parts):
@@ -915,23 +936,37 @@ $filtered = @($lines | Where-Object {{ -not ($_.Contains($hostname) -and $_.Cont
                 f"get_sysmon_events_since: event_ids must be comma-separated integers, got {event_ids!r}"
             )
         event_ids = ",".join(str(int(part)) for part in parts)
-        params: dict[str, Any] = {"record_id": record_id, "event_ids": event_ids}
-        if channel:
-            params["channel"] = channel
-        result = await self._request(
-            "GET",
-            "/sysmon/events/since",
-            params=params,
-            label="live_poll: sysmon events since",
-        )
-        if result is None:
-            return record_id, []
-        try:
-            data = SysmonEventsSinceData.model_validate(result)
-            return data.last_record_id, data.events
-        except Exception as exc:
-            logger.warning("Failed to validate SysmonEventsSinceData: %s", exc)
-            return record_id, []
+
+        all_events: list[SysmonRecordItem] = []
+        current_record_id = record_id
+        any_log_reset = False
+
+        while True:
+            params: dict[str, Any] = {"record_id": current_record_id, "event_ids": event_ids}
+            if channel:
+                params["channel"] = channel
+            result = await self._request(
+                "GET",
+                "/sysmon/events/since",
+                params=params,
+                label="live_poll: sysmon events since",
+            )
+            if result is None:
+                return SysmonEventsResult(current_record_id, all_events, any_log_reset)
+            try:
+                data = SysmonEventsSinceData.model_validate(result)
+                if bool(result.get("log_reset", False)):
+                    any_log_reset = True
+                all_events.extend(data.events)
+                last_id = data.last_record_id
+                # If guest returned >= 100 records and record_id advanced, continue draining
+                if len(data.events) >= 100 and last_id > current_record_id:
+                    current_record_id = last_id
+                    continue
+                return SysmonEventsResult(last_id, all_events, any_log_reset)
+            except Exception as exc:
+                logger.warning("Failed to validate SysmonEventsSinceData: %s", exc)
+                return SysmonEventsResult(current_record_id, all_events, any_log_reset)
 
     async def _export_procmon(self, session_id: str, host_dir: Path) -> str | None:
         if self._procmon_path is None or not getattr(self, "_procmon_started", False):
@@ -1046,6 +1081,21 @@ $filtered = @($lines | Where-Object {{ -not ($_.Contains($hostname) -and $_.Cont
     async def get_version(self) -> VersionData:
         """Same raising contract as get_health() -- see the section docstring above."""
         return await self._get_raising("/version", VersionData)
+
+    async def exists(self, path: str) -> bool:
+        """
+        Check whether a file or directory exists on the guest via GET /filesystem/exists.
+        Returns True if the file or directory exists, False otherwise.
+        """
+        exists_data = await self._request(
+            "GET", "/filesystem/exists", params={"path": path}, label="filesystem: exists"
+        )
+        if exists_data is None:
+            return False
+        try:
+            return bool(ExistsData.model_validate(exists_data).exists)
+        except (ValidationError, TypeError, ValueError, KeyError):
+            return False
 
     # ------------------------------------------------------------------ #
     # Sample Staging & Process Execution
@@ -1221,10 +1271,11 @@ $filtered = @($lines | Where-Object {{ -not ($_.Contains($hostname) -and $_.Cont
 
         proc_data = ProcessStartData.model_validate(envelope.data or {})
         duration_ms = (time.monotonic() - start) * 1000
-        rc = proc_data.exit_code if proc_data.exit_code is not None else 0
+        rc = proc_data.exit_code
         cmd_tuple = ("http_agent", "/process/start", executable_path) + (tuple(arguments) if arguments else ())
+        success = (rc == 0) if rc is not None else False
         return VMOperationResult(
-            success=(rc == 0),
+            success=success,
             command=cmd_tuple,
             duration_ms=duration_ms,
             return_code=rc,
@@ -1270,26 +1321,77 @@ $filtered = @($lines | Where-Object {{ -not ($_.Contains($hostname) -and $_.Cont
     ) -> list[ProcessInfo]:
         """
         Calls guest agent GET /process/query to list running processes matching PID or Name.
+
+        Raises:
+            GuestAgentUnreachableError: on transport errors.
+            GuestAgentError: on HTTP error or envelope.success is False.
+            ContractViolationError: on JSON/schema parsing failures.
+        Returns:
+            list[ProcessInfo]: matching processes. Returns [] ONLY when guest responds
+            with HTTP 200, success=True, and 0 matching processes.
         """
         params: dict[str, Any] = {}
         if pid is not None:
             params["pid"] = pid
         if name is not None:
             params["name"] = name
-        result = await self._request(
-            "GET",
-            "/process/query",
-            params=params,
-            label=f"query_processes: pid={pid} name={name}",
-        )
-        if result is None:
-            return []
+
         try:
-            data = ProcessQueryData.model_validate(result)
-            return data.processes
+            response = await self._send_with_retry(
+                "GET",
+                "/process/query",
+                params=params,
+                label=f"query_processes: pid={pid} name={name}",
+            )
+        except httpx.HTTPError as exc:
+            raise GuestAgentUnreachableError(
+                f"could not reach guest agent for process query at {self._base_url}/process/query: {exc}"
+            ) from exc
+
+        if response.status_code in (401, 403):
+            try:
+                envelope = ResponseEnvelope.model_validate(response.json())
+                raise GuestAgentError(envelope.error_code or ErrorCode.ACCESS_DENIED, envelope.error_message)
+            except GuestAgentError:
+                raise
+            except Exception:
+                raise GuestAgentError(
+                    ErrorCode.ACCESS_DENIED,
+                    f"Authentication failed with status {response.status_code}: {response.text}",
+                )
+
+        if response.status_code != 200:
+            try:
+                envelope = ResponseEnvelope.model_validate(response.json())
+                if not envelope.success:
+                    raise GuestAgentError(envelope.error_code or f"HTTP_{response.status_code}", envelope.error_message)
+            except GuestAgentError:
+                raise
+            except Exception:
+                pass
+            raise GuestAgentError(
+                f"HTTP_{response.status_code}",
+                f"Guest agent returned HTTP {response.status_code}: {response.text}",
+            )
+
+        try:
+            envelope = ResponseEnvelope.model_validate(response.json())
         except Exception as exc:
-            logger.warning("Failed to validate ProcessQueryData: %s", exc)
-            return []
+            raise ContractViolationError(
+                f"guest agent returned unparseable or invalid response envelope for process query: {exc}"
+            ) from exc
+
+        if not envelope.success:
+            raise GuestAgentError(envelope.error_code, envelope.error_message)
+
+        try:
+            data = ProcessQueryData.model_validate(envelope.data or {})
+        except Exception as exc:
+            raise ContractViolationError(
+                f"failed to validate ProcessQueryData from guest agent: {exc}"
+            ) from exc
+
+        return data.processes
 
     async def apply_mutation(
         self,

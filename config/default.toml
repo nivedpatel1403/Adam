@@ -34,14 +34,11 @@ guest_backend = "http"
 
 [sandbox]
 vm_name               = "Windows"
-# "disk-resized-36gb-c-drive" is the canonical golden baseline (config/NOTES.md,
-# 2026-08-11): the ONLY snapshot verified through the real per-run
-# VBoxManage snapshot restore path, carrying the extended 36 GB C: drive
-# required for the guest agent to start reliably. "clean" is retained in
-# the snapshot tree as a rollback anchor only -- do NOT restore to it for
-# normal runs. Supersedes the former "clean" default that caused guest-agent
-# startup failures when ADAM_ENV was not explicitly set to "development".
-snapshot_name         = "disk-resized-36gb-c-drive"
+# Single working baseline, renamed from "disk-resized-36gb-c-drive" after
+# consolidation on 2026-11-03. Its UUID and guest contents are preserved;
+# this is not either of the older snapshots formerly named "clean".
+# See config/NOTES.md for verification results and remaining tooling gaps.
+snapshot_name         = "clean"
 boot_timeout_s        = 300.0
 guest_ready_timeout_s = 300.0
 
@@ -52,7 +49,7 @@ guest_ready_timeout_s = 300.0
 # Phase 5) -- only the event log channel it writes to is named.
 # Run scripts/provision_guest_tools.ps1 inside the guest VM to install Procmon and Tshark.
 [guest_tools]
-procmon_path  = "C:\\Users\\Admin\\Downloads\\ProcessMonitor\\Procmon64.exe"
+procmon_path  = "C:\\ADAM\\Tools\\Procmon\\Procmon64.exe"
 tshark_path   = "C:\\Program Files\\Wireshark\\tshark.exe"
 sysmon_log    = "Microsoft-Windows-Sysmon/Operational"
 tshark_interface = "1"
@@ -79,7 +76,7 @@ port = 8765
 request_timeout_s = 15.0
 # Never commit the real token. Set ADAM__HTTP_GUEST__AUTH_TOKEN in .env.
 auth_token = ""
-procmon_path  = "C:\\Users\\Admin\\Downloads\\ProcessMonitor\\Procmon64.exe"
+procmon_path  = "C:\\ADAM\\Tools\\Procmon\\Procmon64.exe"
 tshark_path   = "C:\\Program Files\\Wireshark\\tshark.exe"
 sysmon_log    = "Microsoft-Windows-Sysmon/Operational"
 tshark_interface = "1"

@@ -40,23 +40,24 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Any, Awaitable, Callable
+from typing import Any
 
 from adam.common.bus import EventBus, Subscription
-from adam.contracts.envelope import Envelope
 from adam.contracts.enums import MutationStatus, Verdict
+from adam.contracts.envelope import Envelope
 from adam.contracts.mutation import MutationResult
 from adam.contracts.policy_decision import PolicyDecision
 from adam.contracts.raw_event import RawEvent
-from adam.contracts.semantic_event import SemanticEvent, Actor, AttckRef
+from adam.contracts.semantic_event import Actor, AttckRef, SemanticEvent
 from adam.deception.engine import DeceptionEngine
 from adam.fusion.engine import EventFusionEngine
+from adam.fusion.mapping import map_detection_to_intent
 from adam.fusion.models import RawEvent as FusionRawEvent
 from adam.policy.context import SessionContext
 from adam.policy.engine import PolicyEngine
-from adam.fusion.mapping import map_detection_to_intent
 
 logger = logging.getLogger(__name__)
 
@@ -280,8 +281,6 @@ def wire_engines(
         decisions = policy.evaluate(env.payload, session_contexts[session_id])
         for decision in decisions:
             handles.decisions_total += 1
-            if decision.verdict == Verdict.EXECUTE:
-                handles.decisions_executed += 1
             d_env = Envelope[PolicyDecision](
                 message_id=str(uuid.uuid4()),
                 message_type="PolicyDecision",
@@ -317,6 +316,7 @@ def wire_engines(
                     )
                     return
 
+                handles.decisions_executed += 1
                 mutation = await deception.execute_async(decision)
                 if mutation.status == MutationStatus.APPLIED:
                     handles.mutations_applied += 1
@@ -352,8 +352,8 @@ def wire_engines(
                     payload=mutation,
                 )
                 await bus.publish(m_env)
-            except Exception as e:
-                logger.error(f"Deception failed unexpectedly for decision=%s: {e}", decision.decision_id, exc_info=True)
+            except Exception:
+                logger.exception("Deception failed unexpectedly for decision=%s", decision.decision_id)
 
     subscriptions = [
         bus.subscribe(PolicyDecision, handle_policy_decision, name="deception_decision", queue_size=100000),

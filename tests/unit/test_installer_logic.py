@@ -341,3 +341,28 @@ def test_uninstall_does_not_delete_install_dir_unless_remove_files_passed() -> N
     fn_text = text[fn_start: fn_start + 2500]
     assert "if ($RemoveFiles)" in fn_text
     assert "Remove-Item -LiteralPath $InstallDir -Recurse -Force" in fn_text
+
+
+# --------------------------------------------------------------------- #
+# Milestone M1 Specific Installer Tests
+# --------------------------------------------------------------------- #
+
+
+def test_scheduled_task_runs_under_system_with_highest_privileges() -> None:
+    """Verifies that the guest scheduled task runs under NT AUTHORITY\\SYSTEM with Highest runlevel."""
+    text = _read()
+    assert "New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest" in text
+
+
+def test_default_procmon_path_in_installer_is_standardized() -> None:
+    """Verifies that the default Procmon path in install.ps1 is C:\\ADAM\\Tools\\Procmon\\Procmon64.exe."""
+    text = _read()
+    assert r"ProcmonPath  = 'C:\ADAM\Tools\Procmon\Procmon64.exe'" in text
+
+
+def test_installer_copies_build_manifest_if_present() -> None:
+    """Verifies that install.ps1 stages build_manifest.json if present in source root."""
+    text = _read()
+    assert "build_manifest.json" in text
+    assert "Copy-Item -Path $manifestSource -Destination $resolvedInstallDir -Force" in text
+

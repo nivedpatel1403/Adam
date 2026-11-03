@@ -47,10 +47,10 @@ silently clobbered by a fresh capture.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import datetime, timezone
 import hashlib
 import logging
+from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
 import aiosqlite
@@ -59,19 +59,20 @@ from adam.collectors.base import BaseCollector
 from adam.common.bus import EventBus
 from adam.common.config import Settings, get_settings
 from adam.common.errors import ConfigError
+from adam.contracts.enums import Arm, NetworkMode, SessionStatus
 from adam.contracts.session import AnalysisSession, SampleRef, SessionConfig, SessionMetrics
-from adam.contracts.enums import Arm, SessionStatus, NetworkMode
-from adam.db.writer import DBWriter
 from adam.db.repositories.sqlite import (
     SQLiteSessionRepository,
-    SQLiteEventRepository,
-    SQLiteDecisionRepository,
-    SQLiteMutationRepository,
 )
+from adam.db.writer import DBWriter
 from adam.deception.engine import DeceptionEngine
 from adam.fusion.engine import EventFusionEngine
 from adam.orchestrator.experiment import resolve_experiment
-from adam.orchestrator.session import SessionOrchestrator, build_collectors_from_telemetry, new_session_id
+from adam.orchestrator.session import (
+    SessionOrchestrator,
+    build_collectors_from_telemetry,
+    new_session_id,
+)
 from adam.pipeline.wiring import wire_engines
 from adam.policy.engine import PolicyEngine
 from adam.sandbox.controller import SandboxController
@@ -397,6 +398,7 @@ class Runner:
         )
 
         session: AnalysisSession | None = None
+        teardown_errors: list[str] = []
         try:
             if runtime.interceptor is not None:
                 if experiment.deception_enabled:
@@ -434,35 +436,47 @@ class Runner:
                 try:
                     await runtime.interceptor.stop()
                     logger.info("session=%s network interceptor stopped", session_id)
-                except Exception:
+                except Exception as exc:
+                    teardown_errors.append(f"Network interceptor stop failed: {exc}")
                     logger.exception("session=%s error stopping network interceptor", session_id)
             aclose = getattr(runtime.channel, "aclose", None)
             if aclose is not None:
                 try:
                     await aclose()
-                except Exception:
+                except Exception as exc:
+                    teardown_errors.append(f"Guest channel aclose failed: {exc}")
                     logger.exception("session=%s error closing guest channel", session_id)
             if db_writer:
                 try:
                     await db_writer.flush()
                     await db_writer.stop()
-                except Exception:
+                except Exception as exc:
+                    teardown_errors.append(f"DBWriter stop failed: {exc}")
                     logger.exception("session=%s error stopping DBWriter", session_id)
+
+            if session is not None and teardown_errors:
+                if session.status == SessionStatus.COMPLETED:
+                    session.status = SessionStatus.PARTIAL
+                err_msg = "; ".join(teardown_errors)
+                session.error = f"{session.error}; {err_msg}" if session.error else err_msg
+
             if db_conn is not None:
                 try:
                     if session_repo is not None:
                         # Update final status in DB
+                        final_status = session.status if session is not None else SessionStatus.FAILED
+                        final_error = session.error if session is not None else ("; ".join(teardown_errors) if teardown_errors else "Runner failed before session completion")
                         final_session = AnalysisSession(
                             session_id=session_id,
                             experiment_id=f"exp_{session_id}",
                             arm=metadata.arm,
                             sample=sample,
                             config=metadata.config,
-                            status=session.status if session is not None else SessionStatus.FAILED,
+                            status=final_status,
                             started_at=session.started_at if session is not None else metadata.started_at,
                             ended_at=session.ended_at if session is not None else datetime.now(timezone.utc),
                             metrics=session.metrics if session is not None else SessionMetrics(),
-                            error=session.error if session is not None else None,
+                            error=final_error,
                         )
                         await session_repo.update(final_session)
                         await db_conn.commit()

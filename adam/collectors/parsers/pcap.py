@@ -113,10 +113,16 @@ def parse_tshark_ek_line(
     tcp_layer = _layer(layers, "tcp")
     udp_layer = _layer(layers, "udp")
 
+    http_layer = _layer(layers, "http")
+
     src_ip = ip_layer.get("ip.src") or ipv6_layer.get("ipv6.src")
     dst_ip = ip_layer.get("ip.dst") or ipv6_layer.get("ipv6.dst")
     src_port = tcp_layer.get("tcp.srcport") or udp_layer.get("udp.srcport")
     dst_port = tcp_layer.get("tcp.dstport") or udp_layer.get("udp.dstport")
+
+    http_full_uri = http_layer.get("http.request.full_uri")
+    http_host = http_layer.get("http.host")
+    http_uri = http_layer.get("http.request.uri")
 
     attributes: dict[str, Any] = {
         "protocols": frame.get("frame.protocols", ""),
@@ -130,6 +136,21 @@ def parse_tshark_ek_line(
         attributes["src_port"] = src_port
     if dst_port is not None:
         attributes["dst_port"] = dst_port
+    if http_full_uri is not None:
+        attributes["http.request.full_uri"] = http_full_uri
+        attributes["network_endpoint"] = http_full_uri
+    if http_host is not None:
+        attributes["http.host"] = http_host
+    if http_uri is not None:
+        attributes["http.request.uri"] = http_uri
+
+    if "network_endpoint" not in attributes:
+        if http_host and http_uri:
+            endpoint = f"http://{http_host}{http_uri}" if not http_uri.startswith("http") else http_uri
+            attributes["http.request.full_uri"] = endpoint
+            attributes["network_endpoint"] = endpoint
+        elif http_host:
+            attributes["network_endpoint"] = f"http://{http_host}"
 
     return RawEvent(
         event_id=f"raw_network_{session_id}_{frame_number}",

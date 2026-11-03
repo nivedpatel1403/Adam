@@ -1,8 +1,14 @@
 from datetime import datetime, timezone
-from typing import Any
+
 from adam.contracts.interfaces import IReportGenerator
-from adam.db.interfaces import ISessionRepository, IEventRepository, IDecisionRepository, IMutationRepository
-from adam.reporting.renderers import JSONRenderer, MarkdownRenderer, HTMLRenderer
+from adam.db.interfaces import (
+    IDecisionRepository,
+    IEventRepository,
+    IMutationRepository,
+    ISessionRepository,
+)
+from adam.reporting.renderers import HTMLRenderer, JSONRenderer, MarkdownRenderer
+
 
 def format_local_time(dt, include_ms=False):
     if not dt:
@@ -95,16 +101,16 @@ class ReportGenerator(IReportGenerator):
         for e in events:
             target = None
             op = "Observed Access"
-            if "target_object" in e.features and e.features["target_object"]:
+            if e.features.get("target_object"):
                 target = e.features["target_object"]
                 op = "File/Reg Access"
-            elif "TargetFilename" in e.features and e.features["TargetFilename"]:
+            elif e.features.get("TargetFilename"):
                 target = e.features["TargetFilename"]
                 op = "File Read/Write"
-            elif "TargetObject" in e.features and e.features["TargetObject"]:
+            elif e.features.get("TargetObject"):
                 target = e.features["TargetObject"]
                 op = "Registry Access"
-            elif "network_endpoint" in e.features and e.features["network_endpoint"]:
+            elif e.features.get("network_endpoint"):
                 target = e.features["network_endpoint"]
                 op = "Network Connect"
             elif e.intent:
@@ -139,11 +145,65 @@ class ReportGenerator(IReportGenerator):
                 "rationale": d.rationale or "—"
             })
 
+        raw_events = []
+        if hasattr(self.event_repo, "get_raw_by_session"):
+            try:
+                raw_events = await self.event_repo.get_raw_by_session(session_id)
+            except Exception:
+                raw_events = []
+
+        source_counts = {"Sysmon": 0, "Procmon": 0, "Tshark": 0}
+        for r in raw_events:
+            src = r.source.value if hasattr(r.source, "value") else str(r.source)
+            src_upper = src.upper()
+            if "SYSMON" in src_upper:
+                source_counts["Sysmon"] += 1
+            elif "PROCMON" in src_upper:
+                source_counts["Procmon"] += 1
+            elif "TSHARK" in src_upper or "WIRESHARK" in src_upper or "NETWORK" in src_upper:
+                source_counts["Tshark"] += 1
+
+        source_outcomes = {
+            "Sysmon": {
+                "source": "Sysmon",
+                "status": "CAPTURED" if source_counts["Sysmon"] > 0 else "NO_DATA",
+                "events_count": source_counts["Sysmon"],
+            },
+            "Procmon": {
+                "source": "Procmon",
+                "status": "CAPTURED" if source_counts["Procmon"] > 0 else "NO_DATA",
+                "events_count": source_counts["Procmon"],
+            },
+            "Tshark": {
+                "source": "Tshark",
+                "status": "CAPTURED" if source_counts["Tshark"] > 0 else "NO_DATA",
+                "events_count": source_counts["Tshark"],
+            },
+        }
+
+        failures = []
+        if session.error:
+            failures.append({
+                "type": "SessionError",
+                "detail": session.error,
+            })
+        for m in mutations:
+            status_val = m.status.value if hasattr(m.status, "value") else str(m.status)
+            if status_val == "FAILED":
+                failures.append({
+                    "type": "MutationFailure",
+                    "primitive": m.primitive,
+                    "detail": m.error or getattr(m, "message", "Unknown mutation failure"),
+                })
+
         data = {
             "session_id": session_id,
             "experiment_id": session.experiment_id,
             "arm": session.arm.value if hasattr(session.arm, "value") else str(session.arm),
             "status": session.status.value if hasattr(session.status, "value") else str(session.status),
+            "error": session.error,
+            "failures": failures,
+            "source_outcomes": source_outcomes,
             "started_at": format_local_time(session.started_at),
             "ended_at": format_local_time(session.ended_at),
             "sample": session.sample.model_dump() if session.sample else {},
@@ -154,10 +214,13 @@ class ReportGenerator(IReportGenerator):
             "decisions": decision_items,
             "detection_risk": high_risk_mutations,
             "metrics": {
+                "raw_events_count": len(raw_events),
                 "events_count": len(events),
                 "mutations_count": len(mutations),
                 "decisions_count": len(decisions),
-                "attck_count": len(attck_coverage)
+                "attck_count": len(attck_coverage),
+                "failures_count": len(failures),
+                "source_counts": source_counts,
             }
         }
 
@@ -185,8 +248,8 @@ class ReportGenerator(IReportGenerator):
         delta_semantic_events = len(t_post_mutation) - len(c_post_mutation)
 
         def extract_distinct(events):
-            intents = set(e.intent for e in events)
-            networks = set(e.features.get("network_endpoint") for e in events if "network_endpoint" in e.features)
+            intents = {e.intent for e in events}
+            networks = {e.features.get("network_endpoint") for e in events if "network_endpoint" in e.features}
             return intents, networks
 
         t_intents, t_networks = extract_distinct(t_post_mutation)

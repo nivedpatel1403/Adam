@@ -12,7 +12,7 @@ ADAM collects telemetry from three primary sources during malware analysis sessi
 3. **TShark (`tshark.exe`)**: Packet capture on the guest network interface (`.pcapng` -> `.json`).
 
 The committed default paths in `config/default.toml` are:
-- `procmon_path = "C:\\Users\\Admin\\Downloads\\ProcessMonitor\\Procmon64.exe"`
+- `procmon_path = "C:\\ADAM\\Tools\\Procmon\\Procmon64.exe"`
 - `tshark_path = "C:\\Program Files\\Wireshark\\tshark.exe"`
 - `sysmon_log = "Microsoft-Windows-Sysmon/Operational"`
 
@@ -36,9 +36,9 @@ Set-ExecutionPolicy Bypass -Scope Process -Force
 ```
 
 The script will:
-- Download and unpack Sysinternals Process Monitor to `C:\Users\Admin\Downloads\ProcessMonitor\Procmon64.exe`.
+- Download and unpack Sysinternals Process Monitor to `C:\ADAM\Tools\Procmon\Procmon64.exe`.
 - Pre-accept the Sysinternals EULA in the registry (`EulaAccepted=1`).
-- Download and install Wireshark silently, placing `tshark.exe` at `C:\Program Files\Wireshark\tshark.exe`.
+- Download and install Npcap and Wireshark silently/automatically, placing `tshark.exe` at `C:\Program Files\Wireshark\tshark.exe` and enabling packet capture on the host-only adapter.
 - Verify the Sysmon service status.
 
 ### Step 3: Take a Clean Golden Snapshot

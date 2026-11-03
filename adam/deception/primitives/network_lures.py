@@ -1,11 +1,19 @@
 from __future__ import annotations
+
 import re
+import uuid
 from typing import Any
+
 from adam.contracts.enums import ChangeKind, MutationStatus
 from adam.contracts.mutation import Change, MutationResult
 from adam.deception.catalogue import register_primitive
-from adam.deception.plausibility import combine, score_naming_consistency, score_timestamp_consistency
+from adam.deception.plausibility import (
+    combine,
+    score_naming_consistency,
+    score_timestamp_consistency,
+)
 from adam.deception.primitives.base import DeceptionPrimitive
+
 
 @register_primitive("MOUNT_FAKE_NETWORK_SHARE")
 class MountFakeNetworkShare(DeceptionPrimitive):
@@ -111,6 +119,11 @@ class FabricateC2Response(DeceptionPrimitive):
                 "FABRICATE_C2_RESPONSE requires an observed target_url/c2_url "
                 "in the policy decision parameters"
             )
+        target_str = str(target)
+        if not target_str.startswith(("http://", "https://")):
+            raise ValueError(
+                f"Unsupported C2 endpoint URL scheme: {target_str}"
+            )
         body = str(parameters.get("response_body", "fake_c2_payload"))
         raw_response = (
             "HTTP/1.1 200 OK\r\n"
@@ -122,11 +135,35 @@ class FabricateC2Response(DeceptionPrimitive):
         return [
             Change(
                 kind=ChangeKind.NETWORK,
-                target=str(target),
+                target=target_str,
                 operation="RESPOND",
                 value=raw_response,
             )
         ]
+
+    async def apply_async(
+        self, session_id: str, correlation_id: str, decision_id: str, parameters: dict[str, Any]
+    ) -> MutationResult:
+        target = parameters.get("target_url") or parameters.get("c2_url")
+        if not target or not str(target).startswith(("http://", "https://")):
+            msg = "No observed HTTP C2 endpoint in session"
+            res = MutationResult(
+                mutation_id=f"mut_{uuid.uuid4().hex[:12]}",
+                session_id=session_id,
+                correlation_id=correlation_id,
+                decision_id=decision_id,
+                primitive=f"{self.name}@{self.version}",
+                status=MutationStatus.SKIPPED,
+                latency_ms=0.0,
+                changes=[],
+                plausibility_score=1.0,
+                plausibility_notes=msg,
+                revertible=False,
+                error=msg,
+            )
+            object.__setattr__(res, "message", msg)
+            return res
+        return await super().apply_async(session_id, correlation_id, decision_id, parameters)
 
     def _plausibility(self, parameters: dict[str, Any]) -> tuple[float, str]:
         ts_score = score_timestamp_consistency(is_post_boot_write=True)

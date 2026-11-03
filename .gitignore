@@ -67,3 +67,5 @@ samples/*
 *.pcap
 *.evtx
 *.pml
+ 
+.agents

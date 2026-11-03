@@ -326,17 +326,24 @@ function Invoke-NativeProcess {
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = $FilePath
     $psi.UseShellExecute = $false
-    $psi.CreateNoWindow = $true
-    $psi.RedirectStandardOutput = $true
-    $psi.RedirectStandardError = $true
-    # Explicit UTF-8, not left to default to the OEM console code page --
-    # matters most for tshark's EK JSON output (NetworkManager.psm1's
-    # RedirectStandardOutputTo path), which is UTF-8 and can legitimately
-    # contain non-ASCII bytes (e.g. internationalized domain names).
-    # Must be set before Start(); only takes effect because
-    # RedirectStandard{Output,Error} are both already true above.
-    $psi.StandardOutputEncoding = [System.Text.Encoding]::UTF8
-    $psi.StandardErrorEncoding = [System.Text.Encoding]::UTF8
+    if ($null -eq $TimeoutMs) {
+        # Detached launch (e.g. Procmon/tshark capture start): do NOT redirect stdout/stderr to pipes.
+        # Unread redirected pipes have finite OS buffers; if filled, detached child processes
+        # block indefinitely waiting for buffer drain.
+        $psi.RedirectStandardOutput = $false
+        $psi.RedirectStandardError = $false
+    } else {
+        $psi.RedirectStandardOutput = $true
+        $psi.RedirectStandardError = $true
+        # Explicit UTF-8, not left to default to the OEM console code page --
+        # matters most for tshark's EK JSON output (NetworkManager.psm1's
+        # RedirectStandardOutputTo path), which is UTF-8 and can legitimately
+        # contain non-ASCII bytes (e.g. internationalized domain names).
+        # Must be set before Start(); only takes effect because
+        # RedirectStandard{Output,Error} are both already true above.
+        $psi.StandardOutputEncoding = [System.Text.Encoding]::UTF8
+        $psi.StandardErrorEncoding = [System.Text.Encoding]::UTF8
+    }
     if ($WorkingDirectory) { $psi.WorkingDirectory = $WorkingDirectory }
 
     # NOT $psi.ArgumentList.Add(...): that property was only added to

@@ -1,5 +1,7 @@
-import jinja2
 from typing import Any
+
+import jinja2
+
 
 class HTMLRenderer:
     def __init__(self):
@@ -69,6 +71,27 @@ class HTMLRenderer:
         .badge-net { background: rgba(147, 197, 253, 0.15); color: #93c5fd; border: 1px solid #3b82f6; }
         .badge-event { background: rgba(16, 185, 129, 0.2); color: #34d399; border: 1px solid #10b981; }
         .badge-mutation { background: rgba(245, 158, 11, 0.2); color: #fbbf24; border: 1px solid #f59e0b; }
+        .badge-failure { background: rgba(239, 68, 68, 0.2); color: #f87171; border: 1px solid #ef4444; }
+        .badge-nodata { background: rgba(148, 163, 184, 0.15); color: #94a3b8; border: 1px solid #64748b; }
+        .failure-box {
+            background: rgba(239, 68, 68, 0.08);
+            border: 1px solid rgba(239, 68, 68, 0.3);
+            border-radius: 8px;
+            padding: 12px 16px;
+            margin-bottom: 10px;
+        }
+        .failure-head {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 6px;
+        }
+        .failure-detail {
+            font-family: monospace;
+            font-size: 0.85rem;
+            color: #f87171;
+            word-break: break-all;
+        }
         
         /* Stats Grid */
         .stats-grid {
@@ -251,6 +274,59 @@ class HTMLRenderer:
         </div>
     </div>
 
+    <!-- Telemetry Sources & Ingestion Status -->
+    <div class="card">
+        <h2>📡 Telemetry Sources & Ingestion Status</h2>
+        {% if source_outcomes %}
+        <table>
+            <thead>
+                <tr>
+                    <th style="width: 180px;">Source</th>
+                    <th style="width: 150px;">Status</th>
+                    <th>Events Captured</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for src_name, src_info in source_outcomes.items() %}
+                <tr>
+                    <td style="font-weight: 600; color: #f0f4f8;">{{ src_name }}</td>
+                    <td>
+                        <span class="badge-pill {% if src_info.status == 'CAPTURED' %}badge-status{% else %}badge-nodata{% endif %}">
+                            {{ src_info.status }}
+                        </span>
+                    </td>
+                    <td style="font-family: monospace; color: #cbd5e1;">{{ src_info.events_count }} events</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        {% else %}
+        <div class="empty-state">No telemetry source outcomes recorded for this session.</div>
+        {% endif %}
+    </div>
+
+    <!-- Failures and Execution Errors -->
+    <div class="card">
+        <h2>⚠️ Failures & Execution Errors</h2>
+        {% if failures %}
+        <div>
+            {% for f in failures %}
+            <div class="failure-box">
+                <div class="failure-head">
+                    <span class="badge-pill badge-failure">{{ f.type }}</span>
+                    {% if f.primitive %}
+                    <span style="font-family: monospace; color: #f0f4f8; font-weight: 600;">{{ f.primitive }}</span>
+                    {% endif %}
+                </div>
+                <div class="failure-detail">{{ f.detail }}</div>
+            </div>
+            {% endfor %}
+        </div>
+        {% else %}
+        <div class="empty-state" style="color: #34d399;">✓ No execution, mutation, or session errors recorded.</div>
+        {% endif %}
+    </div>
+
     <!-- MITRE ATT&CK Matrix -->
     <div class="card">
         <h2>🛡️ MITRE ATT&CK® Coverage</h2>
@@ -369,6 +445,8 @@ class HTMLRenderer:
             decisions=data.get("decisions", []),
             timeline=data.get("timeline", []),
             detection_risk=data.get("detection_risk", []),
+            source_outcomes=data.get("source_outcomes", {}),
+            failures=data.get("failures", []),
         )
 
 

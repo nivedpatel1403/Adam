@@ -74,7 +74,7 @@ $Script:RequiredCommandsByModule = [ordered]@{
     'ProcmonManager.psm1'     = @('Invoke-ProcmonStart', 'Invoke-ProcmonStop', 'Invoke-ProcmonExport', 'Get-ProcmonBackingFileStatus')
     'NetworkManager.psm1'     = @('Get-NetworkInterfaces', 'Invoke-NetworkStart', 'Invoke-NetworkStop', 'Invoke-NetworkConvert')
     'SysmonManager.psm1'      = @('Invoke-SysmonExport', 'Get-SysmonDiagnostics', 'Get-SysmonEventsSince')
-    'DiagnosticsManager.psm1' = @('Get-DiagnosticsToken', 'Get-DiagnosticsServices', 'Get-DiagnosticsDrivers')
+    'DiagnosticsManager.psm1' = @('Get-DiagnosticsToken', 'Get-DiagnosticsServices', 'Get-DiagnosticsDrivers', 'Get-DiagnosticsTools')
     'SampleManager.psm1'      = @('Invoke-SampleUpload', 'Invoke-SampleStage')
     'ArtifactManager.psm1'    = @('Invoke-ArtifactList', 'Invoke-ArtifactPackage', 'Get-ArtifactMetadata')
 }
@@ -133,6 +133,20 @@ Test-RequiredCommandsAvailable
 $Script:Config = Get-AgentConfig -ConfigPath $ConfigPath
 $Script:AgentVersion = '1.0.0'
 $Script:ApiVersion = '1'
+$Script:BuildId = 'unknown'
+
+# Load build manifest if available
+$manifestPath = Join-Path $PSScriptRoot 'build_manifest.json'
+if (Test-Path -LiteralPath $manifestPath) {
+    try {
+        $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+        if ($manifest.build_id) {
+            $Script:BuildId = [string]$manifest.build_id
+        }
+    } catch {
+        Write-AgentLog -Level WARN -Message "failed to parse build manifest at $manifestPath: $($_.Exception.Message)"
+    }
+}
 $Script:StartTime = Get-Date
 
 function Read-JsonBody {
@@ -210,7 +224,7 @@ function Invoke-Route {
             return @{ Kind = 'json'; Envelope = (New-SuccessEnvelope -Data @{ status = 'ok'; uptime_s = $uptime }) }
         }
         'GET /version' {
-            return @{ Kind = 'json'; Envelope = (New-SuccessEnvelope -Data @{ agent_version = $Script:AgentVersion; api_version = $Script:ApiVersion }) }
+            return @{ Kind = 'json'; Envelope = (New-SuccessEnvelope -Data @{ agent_version = $Script:AgentVersion; api_version = $Script:ApiVersion; build_id = $Script:BuildId }) }
         }
 
         # ---------------- Filesystem ----------------
@@ -282,7 +296,14 @@ function Invoke-Route {
         'GET /process/query' {
             $name = Get-QueryParam -Request $Request -Name 'name'
             $pidRaw = Get-QueryParam -Request $Request -Name 'pid'
-            $requestedPid = if ($pidRaw) { [int]$pidRaw } else { $null }
+            $requestedPid = $null
+            if ($pidRaw) {
+                try {
+                    $requestedPid = [int]$pidRaw
+                } catch {
+                    return @{ Kind = 'json'; Envelope = (New-ErrorEnvelope -ErrorCode $Script:ErrorCodes.InvalidArgument -ErrorMessage "Invalid pid query parameter: $pidRaw") }
+                }
+            }
             return @{ Kind = 'json'; Envelope = (Invoke-ProcessQuery -Name $name -ProcessId $requestedPid) }
         }
 
@@ -336,7 +357,14 @@ function Invoke-Route {
             $eventIds = Get-QueryParam -Request $Request -Name 'event_ids'
             $channel = Get-QueryParam -Request $Request -Name 'channel'
             if (-not $channel) { $channel = $Script:Config['SysmonLog'] }
-            $rId = if ($recordId) { [int]$recordId } else { 0 }
+            $rId = 0
+            if ($recordId) {
+                try {
+                    $rId = [long]$recordId
+                } catch {
+                    return @{ Kind = 'json'; Envelope = (New-ErrorEnvelope -ErrorCode $Script:ErrorCodes.InvalidArgument -ErrorMessage "Invalid record_id query parameter: $recordId") }
+                }
+            }
             $eIds = if ($eventIds) { $eventIds } else { '1,3' }
             return @{ Kind = 'json'; Envelope = (Get-SysmonEventsSince -RecordId $rId -EventIds $eIds -Channel $channel) }
         }
@@ -352,6 +380,9 @@ function Invoke-Route {
         'GET /diagnostics/drivers' {
             $name = Get-QueryParam -Request $Request -Name 'name'
             return @{ Kind = 'json'; Envelope = (Get-DiagnosticsDrivers -Name $name) }
+        }
+        'GET /diagnostics/tools' {
+            return @{ Kind = 'json'; Envelope = (Get-DiagnosticsTools -ProcmonPath $Script:Config['ProcmonPath'] -TsharkPath $Script:Config['TsharkPath'] -SysmonLog $Script:Config['SysmonLog']) }
         }
 
         # ---------------- Sample ----------------

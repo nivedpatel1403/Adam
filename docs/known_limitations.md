@@ -28,12 +28,14 @@ This document lists the known architectural and operational limitations of the A
 ---
 
 ### 3. Procmon & Tshark Telemetry in Golden Image
-- **Status**: **RESOLVED (Tooling + Graceful Degradation)**
-- **Root Cause**: The golden guest snapshot (`disk-resized-36gb-c-drive`) lacked `Procmon64.exe` and `tshark.exe` at configured paths.
+- **Status**: **RESOLVED (Standardized Paths + Verified Baseline)**
+- **Root Cause**: The legacy guest snapshot (`disk-resized-36gb-c-drive`) lacked `Procmon64.exe` and `tshark.exe` at standardized paths.
 - **Resolution**:
-  - Created automated guest provisioning script `scripts/provision_guest_tools.ps1` to download and install Process Monitor, Wireshark/Tshark, accept EULAs, and check Sysmon.
-  - Authored comprehensive guide in `docs/guest-provisioning-guide.md` with snapshot instructions.
-  - Added `tool_availability` caching to `HTTPGuestChannel` and updated `start_captures()` to gracefully skip missing tools rather than producing error cascades.
+  - The snapshot has been consolidated into a verified `clean` snapshot.
+  - Standardized the Procmon path on `C:\ADAM\Tools\Procmon\Procmon64.exe` across guest configuration, installer defaults, provisioning scripts, and host configurations.
+  - Staged and verified Tshark and Npcap capture driver on the host-only interface.
+  - Added automated guest provisioning script `scripts/provision_guest_tools.ps1` and verification harness `scripts/verify_candidate_snapshots.py`.
+  - Added `tool_availability` caching to `HTTPGuestChannel` and updated `start_captures()` to gracefully skip missing tools when running with non-strict configuration.
   - Added `tools_required` configuration flag in `config/default.toml` and `adam/common/config.py` (default: `false` for graceful degradation; `true` for strict fail-fast mode).
 
 ---

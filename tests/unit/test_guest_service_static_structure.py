@@ -16,6 +16,7 @@ NOTHING about runtime correctness -- see docs/phase5-migration-guide.md's
 from __future__ import annotations
 
 import re
+import sys
 from pathlib import Path
 
 import pytest
@@ -243,3 +244,158 @@ def test_route_table_covers_every_get_and_post_in_api_spec() -> None:
 
     missing_from_router = documented_routes - router_routes
     assert not missing_from_router, f"routes documented in the API spec but missing from adam_agent.ps1's router: {missing_from_router}"
+
+
+# --------------------------------------------------------------------- #
+# Milestone M1 Specific Verification Tests
+# --------------------------------------------------------------------- #
+
+
+def test_procmon_default_path_standardized_across_codebase() -> None:
+    """
+    Verifies that the default Procmon path is standardized on
+    C:\\ADAM\\Tools\\Procmon\\Procmon64.exe across:
+    - config/default.toml ([guest_tools] and [http_guest])
+    - adam/sandbox/guest/agent/install.ps1
+    - adam/sandbox/guest/agent/modules/AgentConfig.psm1
+    - scripts/provision_guest_tools.ps1
+    - docs/guest-provisioning-guide.md
+    """
+    root = Path(__file__).resolve().parents[2]
+    expected_exe = r"C:\ADAM\Tools\Procmon\Procmon64.exe"
+    expected_toml_escaped = r"C:\\ADAM\\Tools\\Procmon\\Procmon64.exe"
+
+    # config/default.toml
+    default_toml = (root / "config" / "default.toml").read_text(encoding="utf-8")
+    assert f'procmon_path  = "{expected_toml_escaped}"' in default_toml or f'procmon_path = "{expected_toml_escaped}"' in default_toml
+    assert "C:\\\\Users\\\\Admin\\\\Downloads\\\\ProcessMonitor" not in default_toml
+
+    # AgentConfig.psm1
+    agent_config = (GUEST_AGENT_DIR / "modules" / "AgentConfig.psm1").read_text(encoding="utf-8")
+    assert f"ProcmonPath    = '{expected_exe}'" in agent_config or f"ProcmonPath  = '{expected_exe}'" in agent_config
+    assert "C:\\Users\\Admin\\Downloads\\ProcessMonitor" not in agent_config
+
+    # install.ps1
+    install_ps1 = (GUEST_AGENT_DIR / "install.ps1").read_text(encoding="utf-8")
+    assert f"ProcmonPath  = '{expected_exe}'" in install_ps1
+
+    # scripts/provision_guest_tools.ps1
+    prov_script = (root / "scripts" / "provision_guest_tools.ps1").read_text(encoding="utf-8")
+    assert r'[string]$ProcmonDir = "C:\ADAM\Tools\Procmon"' in prov_script
+
+    # docs/guest-provisioning-guide.md
+    guide = (root / "docs" / "guest-provisioning-guide.md").read_text(encoding="utf-8")
+    assert f'procmon_path = "{expected_toml_escaped}"' in guide
+    assert f"`{expected_exe}`" in guide
+
+
+def test_detached_process_launch_disables_stream_redirection() -> None:
+    """
+    In Common.psm1's Invoke-NativeProcess, detached launches ($TimeoutMs -eq $null)
+    must NOT redirect stdout/stderr pipes, preventing process deadlocks on full pipe buffers.
+    """
+    text = (GUEST_AGENT_DIR / "modules" / "Common.psm1").read_text(encoding="utf-8")
+    assert "$null -eq $TimeoutMs" in text
+    assert "$psi.RedirectStandardOutput = $false" in text
+    assert "$psi.RedirectStandardError = $false" in text
+
+
+def test_procmon_export_and_convert_checks_exit_code_and_non_empty_file() -> None:
+    """
+    In ProcmonManager.psm1, Invoke-ProcmonStop must flush buffers and wait for process exit,
+    and Invoke-ProcmonExport must verify ExitCode -eq 0 and assert non-empty CSV output.
+    """
+    text = (GUEST_AGENT_DIR / "modules" / "ProcmonManager.psm1").read_text(encoding="utf-8")
+    assert "$result.ExitCode -ne 0" in text
+    assert "$csvItem.Length -le 0" in text
+    assert "WaitForExit" in text
+
+
+def test_network_convert_checks_exit_code_and_non_empty_file() -> None:
+    """
+    In NetworkManager.psm1, Invoke-NetworkStop must flush buffers, and
+    Invoke-NetworkConvert must verify ExitCode -eq 0 and assert non-empty EK JSON.
+    """
+    text = (GUEST_AGENT_DIR / "modules" / "NetworkManager.psm1").read_text(encoding="utf-8")
+    assert "$result.ExitCode -ne 0" in text
+    assert "$ekItem.Length -le 0" in text
+    assert "WaitForExit" in text
+
+
+def test_network_start_has_dynamic_host_only_adapter_resolution() -> None:
+    """
+    In NetworkManager.psm1, dynamic adapter detection matches Ethernet or 192.168.19.x network,
+    avoiding loopback capture.
+    """
+    text = (GUEST_AGENT_DIR / "modules" / "NetworkManager.psm1").read_text(encoding="utf-8")
+    assert "Resolve-HostOnlyInterfaceIndex" in text
+    assert "192.168.19." in text
+    assert "Ethernet" in text
+    assert "loopback" in text
+
+
+def test_sysmon_events_since_has_multipage_draining_and_log_reset() -> None:
+    """
+    In SysmonManager.psm1, Get-SysmonEventsSince implements multi-page draining
+    and handles log resets when current_max_id < requested_record_id.
+    """
+    text = (GUEST_AGENT_DIR / "modules" / "SysmonManager.psm1").read_text(encoding="utf-8")
+    assert "$logReset" in text
+    assert "$currentMaxId -lt $RecordId" in text
+    assert "log_reset" in text
+    assert "$batchSize" in text
+    assert "last_record_id" in text
+
+
+def test_diagnostics_tools_endpoint_and_function_exist() -> None:
+    """
+    DiagnosticsManager.psm1 must export Get-DiagnosticsTools returning availability of
+    Procmon, Tshark, Npcap, and Sysmon, and adam_agent.ps1 must wire GET /diagnostics/tools.
+    """
+    diag_text = (GUEST_AGENT_DIR / "modules" / "DiagnosticsManager.psm1").read_text(encoding="utf-8")
+    assert "function Get-DiagnosticsTools" in diag_text
+    assert "Export-ModuleMember" in diag_text and "Get-DiagnosticsTools" in diag_text
+    assert "procmon" in diag_text
+    assert "tshark" in diag_text
+    assert "npcap" in diag_text
+    assert "sysmon" in diag_text
+
+    agent_text = (GUEST_AGENT_DIR / "adam_agent.ps1").read_text(encoding="utf-8")
+    assert "'GET /diagnostics/tools'" in agent_text
+    assert "Get-DiagnosticsTools" in agent_text
+
+
+def test_agent_packaging_and_manifest_generation() -> None:
+    """
+    Verifies that scripts/package_guest_agent.py generates build_manifest.json with
+    a valid build_id and SHA256 hashes, and that adam_agent.ps1 exposes build_id on GET /version.
+    """
+    root = Path(__file__).resolve().parents[2]
+    package_script = root / "scripts" / "package_guest_agent.py"
+    assert package_script.exists()
+
+    # Import package script functions directly
+    sys_path_added = False
+    if str(root) not in sys.path:
+        sys.path.insert(0, str(root))
+        sys_path_added = True
+
+    try:
+        from scripts.package_guest_agent import generate_manifest, verify_manifest
+        manifest = generate_manifest(GUEST_AGENT_DIR)
+        assert "build_id" in manifest
+        assert len(manifest["build_id"]) >= 8
+        assert manifest["file_count"] >= 10
+        assert "adam_agent.ps1" in manifest["files"]
+        assert "modules/Common.psm1" in manifest["files"]
+
+        # Verify against disk
+        assert verify_manifest(GUEST_AGENT_DIR) is True
+    finally:
+        if sys_path_added:
+            sys.path.remove(str(root))
+
+    agent_text = (GUEST_AGENT_DIR / "adam_agent.ps1").read_text(encoding="utf-8")
+    assert "build_id" in agent_text
+    assert "build_manifest.json" in agent_text
+

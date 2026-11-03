@@ -98,8 +98,7 @@ import uuid
 from collections.abc import Sequence
 from datetime import datetime, timezone
 from pathlib import Path
-
-from pydantic import BaseModel, ConfigDict
+from typing import Any
 
 from adam.collectors.base import BaseCollector
 from adam.collectors.network import NetworkCollector
@@ -111,18 +110,29 @@ from adam.common.config import Settings
 from adam.contracts.enums import Arm, NetworkMode, SessionStatus, Source
 from adam.contracts.envelope import Envelope
 from adam.contracts.raw_event import ProcessInfo, RawEvent
-from adam.contracts.session import AnalysisSession, SampleRef, SessionConfig, SessionLifecycle, SessionMetrics
+from adam.contracts.session import (
+    AnalysisSession,
+    SampleRef,
+    SessionConfig,
+    SessionLifecycle,
+    SessionMetrics,
+)
 from adam.orchestrator.experiment import resolve_experiment
 from adam.orchestrator.persistence import RawEventWriter
 from adam.sandbox.controller import SandboxController
 from adam.sandbox.guest.channel import GuestChannel, TelemetryArtifacts
-from adam.sandbox.state import SandboxOperationError
 from adam.sandbox.guest.http_models import SysmonRecordItem
+from adam.sandbox.state import SandboxOperationError
 
 logger = logging.getLogger(__name__)
 
 
-def build_collectors_from_telemetry(session_id: str, artifacts: TelemetryArtifacts) -> list[BaseCollector]:
+def build_collectors_from_telemetry(
+    session_id: str,
+    artifacts: TelemetryArtifacts,
+    *,
+    watermark_record_id: int | None = None,
+) -> list[BaseCollector]:
     """
     Step 10 of the Phase 5 guest-agent lifecycle: construct whichever
     concrete collectors have a real, exported host path to tail. Mirrors
@@ -137,7 +147,13 @@ def build_collectors_from_telemetry(session_id: str, artifacts: TelemetryArtifac
     """
     collectors: list[BaseCollector] = []
     if artifacts.sysmon_evtx_path is not None:
-        collectors.append(SysmonCollector(artifacts.sysmon_evtx_path, session_id=session_id))
+        collectors.append(
+            SysmonCollector(
+                artifacts.sysmon_evtx_path,
+                session_id=session_id,
+                watermark_record_id=watermark_record_id,
+            )
+        )
     if artifacts.procmon_csv_path is not None:
         collectors.append(ProcmonCollector(artifacts.procmon_csv_path, session_id=session_id))
     if artifacts.network_ek_json_path is not None:
@@ -248,9 +264,73 @@ class SessionOrchestrator:
         # Tests and offline replay can disable polling without changing
         # [live] configuration; both this flag and live.enabled must be true.
         self._live_poll_enabled = live_poll_enabled
+        self._session_id: str | None = None
+        self._seen_event_keys: set[tuple[str, str, int, Any]] = set()
 
     def _guest_target_path_for(self, sample: SampleRef) -> str:
         return self._guest_target_path_template.format(filename=sample.filename)
+
+    async def ingest_raw_event(
+        self,
+        event: RawEvent,
+        writer: RawEventWriter,
+        channel: str = "sysmon",
+        generation: int = 0,
+    ) -> bool:
+        """
+        Single unified ingestion path for both live polling and exported collectors.
+
+        1. Validates session ownership (event.session_id == self._session_id).
+        2. Deduplicates using (session_id, channel, generation, event.source_event_id).
+        3. Persists raw event to raw.jsonl via await writer.write(event).
+        4. Publishes Envelope[RawEvent] to the event bus.
+
+        Returns True if accepted and published, False if dropped as duplicate.
+        """
+        if self._session_id is not None and event.session_id != self._session_id:
+            raise ValueError(
+                f"session ownership validation failed: event session_id {event.session_id!r} "
+                f"does not match orchestrator session_id {self._session_id!r}"
+            )
+        if self._session_id is None:
+            self._session_id = event.session_id
+
+        dedup_key = (event.session_id, channel, generation, event.source_event_id)
+        if dedup_key in self._seen_event_keys:
+            logger.debug("session=%s dropping duplicate raw event %s", event.session_id, dedup_key)
+            return False
+
+        self._seen_event_keys.add(dedup_key)
+
+        try:
+            await writer.write(event)
+        except Exception:
+            logger.exception(
+                "session=%s channel=%s failed to persist RawEvent to raw.jsonl -- event lost",
+                event.session_id,
+                channel,
+            )
+            return False
+
+        envelope: Envelope[RawEvent] = Envelope(
+            message_id=f"msg_{uuid.uuid4().hex}",
+            message_type="RawEvent",
+            session_id=event.session_id,
+            correlation_id=event.event_id,
+            emitted_at=datetime.now(timezone.utc),
+            emitter=f"collector.{channel}",
+            payload=event,
+        )
+        try:
+            await self._bus.publish(envelope)
+        except Exception:
+            logger.exception(
+                "session=%s channel=%s failed to publish RawEvent onto bus (already durable in raw.jsonl)",
+                event.session_id,
+                channel,
+            )
+
+        return True
 
     async def _publish_lifecycle(self, session_id: str, status: SessionStatus, detail: str) -> None:
         lifecycle = SessionLifecycle(
@@ -272,49 +352,20 @@ class SessionOrchestrator:
 
     async def _pump(self, collector: BaseCollector, session_id: str, writer: RawEventWriter) -> None:
         """
-        The "thin wrapper" the roadmap's Phase 2 notes describe: drains one
-        collector's iter_events() for the lifetime of the session.
-
-        Writes to raw.jsonl BEFORE publishing to the bus, deliberately: per
-        ADR-005 and persistence.py's own module docstring, raw.jsonl is the
-        authoritative record and must not be affected by the bus's lossy
-        drop-under-backpressure delivery (section 8.2/8.3) -- if publishing
-        raced ahead of persisting, a dropped bus message would have no
-        bearing on durability, but the reverse ordering keeps that
-        guarantee true by construction rather than by coincidence.
-
-        correlation_id policy: since Fusion (which would normally assign a
-        shared correlation_id across a cluster of related raw events) does
-        not exist yet, each RawEvent's own event_id is used as its
-        correlation_id -- every event starts as its own correlation chain,
-        joinable later. Disclosed placeholder, not a claim this is Fusion's
-        real correlation logic.
+        Drains one collector's iter_events() for the lifetime of the session,
+        routing each RawEvent through the unified ingest_raw_event() pipeline.
         """
         async for event in collector.iter_events():
             try:
-                await writer.write(event)
-            except Exception:
-                logger.exception(
-                    "session=%s collector=%s failed to persist RawEvent -- event lost",
-                    session_id,
-                    collector.source_name,
+                await self.ingest_raw_event(
+                    event,
+                    writer,
+                    channel=collector.source_name,
+                    generation=0,
                 )
-                continue
-
-            envelope: Envelope[RawEvent] = Envelope(
-                message_id=f"msg_{uuid.uuid4().hex}",
-                message_type="RawEvent",
-                session_id=session_id,
-                correlation_id=event.event_id,
-                emitted_at=datetime.now(timezone.utc),
-                emitter=f"collector.{collector.source_name}",
-                payload=event,
-            )
-            try:
-                await self._bus.publish(envelope)
             except Exception:
                 logger.exception(
-                    "session=%s collector=%s failed to publish RawEvent onto bus (already durable in raw.jsonl)",
+                    "session=%s collector=%s error during ingest_raw_event",
                     session_id,
                     collector.source_name,
                 )
@@ -324,6 +375,7 @@ class SessionOrchestrator:
         session_id: str,
         stop_event: asyncio.Event,
         *,
+        writer: RawEventWriter | None = None,
         initial_record_id: int = -1,
         event_ids: str = "1,3,5,11,12,13,22",
         poll_interval_s: float = 1.0,
@@ -340,17 +392,19 @@ class SessionOrchestrator:
         attribute it to the sample.
         """
         last_record_id = initial_record_id
+        log_generation = 0
         if last_record_id < 0:
             try:
-                last_record_id, _ = await self._guest_agent.get_sysmon_events_since(
+                baseline_res = await self._guest_agent.get_sysmon_events_since(
                     record_id=-1, event_ids=event_ids
                 )
+                last_record_id = baseline_res[0] if isinstance(baseline_res, tuple) else getattr(baseline_res, "last_record_id", -1)
                 logger.info(
                     "session=%s live sysmon baseline record_id=%d established",
                     session_id,
                     last_record_id,
                 )
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001
                 logger.warning(
                     "session=%s failed to query sysmon baseline -- live polling "
                     "disabled for this session (not replaying history): %s",
@@ -373,11 +427,23 @@ class SessionOrchestrator:
 
                 for batch_index in range(max_batches_per_cycle):
                     previous_id = last_record_id
-                    next_id, records = await self._guest_agent.get_sysmon_events_since(
+                    res = await self._guest_agent.get_sysmon_events_since(
                         record_id=last_record_id, event_ids=event_ids
                     )
-                    if next_id > last_record_id:
-                        last_record_id = next_id
+                    next_id, records = res[0], res[1]
+
+                    is_reset = getattr(res, "log_reset", False) or (last_record_id > 0 and next_id < last_record_id)
+                    if is_reset:
+                        log_generation += 1
+                        logger.info(
+                            "session=%s sysmon log reset detected (next_id=%d, last_id=%d), incremented log_generation to %d",
+                            session_id,
+                            next_id,
+                            last_record_id,
+                            log_generation,
+                        )
+
+                    last_record_id = next_id
 
                     for record in records:
                         try:
@@ -404,20 +470,29 @@ class SessionOrchestrator:
                             raw_event.process.image if raw_event.process else "N/A",
                             raw_event.process.pid if raw_event.process else "N/A",
                         )
-                        envelope: Envelope[RawEvent] = Envelope(
-                            message_id=f"msg_{uuid.uuid4().hex}",
-                            message_type="RawEvent",
-                            session_id=session_id,
-                            correlation_id=raw_event.event_id,
-                            emitted_at=wall_clock_now,
-                            emitter="collector.sysmon.live",
-                            payload=raw_event,
-                        )
-                        await self._bus.publish(envelope)
+
+                        if writer is not None:
+                            await self.ingest_raw_event(
+                                raw_event,
+                                writer,
+                                channel="sysmon",
+                                generation=log_generation,
+                            )
+                        else:
+                            envelope: Envelope[RawEvent] = Envelope(
+                                message_id=f"msg_{uuid.uuid4().hex}",
+                                message_type="RawEvent",
+                                session_id=session_id,
+                                correlation_id=raw_event.event_id,
+                                emitted_at=wall_clock_now,
+                                emitter="collector.sysmon.live",
+                                payload=raw_event,
+                            )
+                            await self._bus.publish(envelope)
 
                     # Stop when the batch was short (the guest drained its
-                    # current backlog) or the record ID did not advance.
-                    if len(records) < batch_size or next_id <= previous_id:
+                    # current backlog) or the record ID did not advance (unless reset).
+                    if len(records) < batch_size or (next_id <= previous_id and not is_reset):
                         break
                     if batch_index == max_batches_per_cycle - 1:
                         logger.warning(
@@ -498,6 +573,8 @@ class SessionOrchestrator:
         """
         if session_id is None:
             session_id = new_session_id()
+        self._session_id = session_id
+        self._seen_event_keys.clear()
         started_at = datetime.now(timezone.utc)
         guest_target_path = self._guest_target_path_for(sample)
 
@@ -611,6 +688,26 @@ class SessionOrchestrator:
                         session_id,
                     )
 
+            # Pre-detonation Sysmon watermark: always establish before detonation, bound to session and channel
+            watermark_record_id: int | None = None
+            if self._guest_agent is not None and hasattr(self._guest_agent, "get_sysmon_events_since"):
+                try:
+                    wm_res = await self._guest_agent.get_sysmon_events_since(record_id=-1, event_ids="1,3,5,11,12,13,22")
+                    wm_id = wm_res[0] if isinstance(wm_res, tuple) else getattr(wm_res, "last_record_id", -1)
+                    if wm_id >= 0:
+                        watermark_record_id = wm_id
+                        logger.info(
+                            "session=%s established pre-detonation Sysmon watermark record_id=%d",
+                            session_id,
+                            watermark_record_id,
+                        )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "session=%s failed to query pre-detonation Sysmon watermark: %s",
+                        session_id,
+                        exc,
+                    )
+
             status = SessionStatus.RUNNING
             await self._publish_lifecycle(session_id, status, "detonating sample")
 
@@ -623,31 +720,33 @@ class SessionOrchestrator:
                 and self._guest_agent is not None
                 and hasattr(self._guest_agent, "get_sysmon_events_since")
             ):
-                # Baseline: query current max RecordId strictly *before*
-                # detonation starts. On failure, skip the poll task entirely
-                # rather than falling back to 0 (which replays history).
-                initial_record_id = -1
-                try:
-                    initial_record_id, _ = await self._guest_agent.get_sysmon_events_since(
-                        record_id=-1, event_ids=live.sysmon_event_ids
-                    )
-                    logger.info(
-                        "session=%s live sysmon pre-detonation baseline record_id=%d",
-                        session_id,
-                        initial_record_id,
-                    )
-                except Exception as exc:
-                    logger.warning(
-                        "session=%s failed to query sysmon pre-detonation baseline "
-                        "-- live polling disabled for this session (not replaying history): %s",
-                        session_id,
-                        exc,
-                    )
-                else:
+                initial_record_id = watermark_record_id if watermark_record_id is not None else -1
+                if initial_record_id < 0:
+                    try:
+                        base_res = await self._guest_agent.get_sysmon_events_since(
+                            record_id=-1, event_ids=live.sysmon_event_ids
+                        )
+                        initial_record_id = base_res[0] if isinstance(base_res, tuple) else getattr(base_res, "last_record_id", -1)
+                        if initial_record_id >= 0:
+                            watermark_record_id = initial_record_id
+                        logger.info(
+                            "session=%s live sysmon pre-detonation baseline record_id=%d",
+                            session_id,
+                            initial_record_id,
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning(
+                            "session=%s failed to query sysmon pre-detonation baseline "
+                            "-- live polling disabled for this session (not replaying history): %s",
+                            session_id,
+                            exc,
+                        )
+                if initial_record_id >= 0:
                     live_poll_task = asyncio.create_task(
                         self._run_live_sysmon_poll(
                             session_id,
                             stop_live_poll,
+                            writer=writer,
                             initial_record_id=initial_record_id,
                             event_ids=live.sysmon_event_ids,
                             poll_interval_s=live.poll_interval_s,
@@ -699,7 +798,9 @@ class SessionOrchestrator:
                     )
                     artifacts = TelemetryArtifacts()
 
-                guest_collectors = build_collectors_from_telemetry(session_id, artifacts)
+                guest_collectors = build_collectors_from_telemetry(
+                    session_id, artifacts, watermark_record_id=watermark_record_id
+                )
                 for collector in guest_collectors:
                     await collector.start()
                     collectors_started = True  # same reasoning as the constructor-injected loop above

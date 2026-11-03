@@ -24,7 +24,7 @@ function Get-AgentConfig {
     $defaults = @{
         ListenPrefix   = 'http://+:8765/'
         AuthToken      = ''
-        ProcmonPath    = 'C:\Users\Admin\Downloads\ProcessMonitor\Procmon64.exe'
+        ProcmonPath    = 'C:\ADAM\Tools\Procmon\Procmon64.exe'
         TsharkPath     = 'C:\Program Files\Wireshark\tshark.exe'
         SysmonLog      = 'Microsoft-Windows-Sysmon/Operational'
         CaptureDir     = 'C:\ADAM\telemetry'
@@ -40,6 +40,9 @@ function Get-AgentConfig {
         $merged = $defaults.Clone()
         foreach ($prop in $raw.PSObject.Properties) {
             $merged[$prop.Name] = $prop.Value
+        }
+        if ($merged['ProcmonPath'] -like '*ProcessMonitor*Procmon64.exe' -and (-not (Test-Path -LiteralPath $merged['ProcmonPath'])) -and (Test-Path -LiteralPath $defaults['ProcmonPath'])) {
+            $merged['ProcmonPath'] = $defaults['ProcmonPath']
         }
         return $merged
     } catch {

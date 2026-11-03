@@ -61,7 +61,21 @@ function Invoke-ProcmonStop {
         # /Terminate always carries /AcceptEula too -- see module docstring.
         $args = @('/AcceptEula', '/Terminate')
         $result = Invoke-NativeProcess -FilePath $ProcmonPath -ArgumentList $args -TimeoutMs 15000
-        $Script:RunningCaptures.Remove($SessionId) | Out-Null
+        
+        # Flush buffers and ensure capture process exits cleanly
+        if ($Script:RunningCaptures.ContainsKey($SessionId)) {
+            $tPid = $Script:RunningCaptures[$SessionId]
+            $proc = Get-Process -Id $tPid -ErrorAction SilentlyContinue
+            if ($proc) {
+                try { $proc.WaitForExit(5000) | Out-Null } catch { }
+            }
+            $Script:RunningCaptures.Remove($SessionId) | Out-Null
+        }
+        foreach ($p in (Get-Process -Name 'Procmon', 'Procmon64' -ErrorAction SilentlyContinue)) {
+            try { $p.WaitForExit(3000) | Out-Null } catch { }
+        }
+        Start-Sleep -Milliseconds 500
+
         if ($result.TimedOut) {
             Write-AgentLog -Level WARN -Message "session=$SessionId Procmon /Terminate timed out"
             return New-ErrorEnvelope -ErrorCode $Script:ErrorCodes.Timeout -ErrorMessage "/Terminate did not complete in time"
@@ -88,8 +102,15 @@ function Invoke-ProcmonExport {
         if ($result.TimedOut) {
             return New-ErrorEnvelope -ErrorCode $Script:ErrorCodes.Timeout -ErrorMessage "PML->CSV conversion did not complete in time"
         }
+        if ($result.ExitCode -ne 0) {
+            return New-ErrorEnvelope -ErrorCode $Script:ErrorCodes.InternalError -ErrorMessage "PML->CSV conversion failed with exit code $($result.ExitCode): $($result.StdErr)"
+        }
         if (-not (Test-Path -LiteralPath $CsvPath)) {
             return New-ErrorEnvelope -ErrorCode $Script:ErrorCodes.InternalError -ErrorMessage "conversion reported completion but $CsvPath does not exist"
+        }
+        $csvItem = Get-Item -LiteralPath $CsvPath
+        if ($csvItem.Length -le 0) {
+            return New-ErrorEnvelope -ErrorCode $Script:ErrorCodes.InternalError -ErrorMessage "conversion produced an empty CSV file ($CsvPath has 0 bytes)"
         }
         return New-SuccessEnvelope -Data @{ csv_path = $CsvPath }
     } catch {

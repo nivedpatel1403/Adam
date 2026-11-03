@@ -283,4 +283,69 @@ function Get-DiagnosticsDrivers {
     }
 }
 
-Export-ModuleMember -Function Get-DiagnosticsToken, Get-DiagnosticsServices, Get-DiagnosticsDrivers
+function Get-DiagnosticsTools {
+    param(
+        [Parameter(Mandatory = $false)][string]$ProcmonPath = 'C:\ADAM\Tools\Procmon\Procmon64.exe',
+        [Parameter(Mandatory = $false)][string]$TsharkPath = 'C:\Program Files\Wireshark\tshark.exe',
+        [Parameter(Mandatory = $false)][string]$SysmonLog = 'Microsoft-Windows-Sysmon/Operational'
+    )
+    try {
+        # 1. Procmon availability
+        $procmonAvail = Test-Path -LiteralPath $ProcmonPath
+        $procmonVersion = $null
+        if ($procmonAvail) {
+            try {
+                $procmonVersion = (Get-Item -LiteralPath $ProcmonPath).VersionInfo.ProductVersion
+            } catch { }
+        }
+
+        # 2. Tshark availability
+        $tsharkAvail = Test-Path -LiteralPath $TsharkPath
+        $tsharkVersion = $null
+        if ($tsharkAvail) {
+            try {
+                $tsharkVersion = (Get-Item -LiteralPath $TsharkPath).VersionInfo.ProductVersion
+            } catch { }
+        }
+
+        # 3. Npcap capture driver availability
+        $npcapSvc = Get-Service -Name "npcap" -ErrorAction SilentlyContinue
+        $npcapAvail = ($null -ne $npcapSvc)
+        $npcapStatus = if ($npcapSvc) { $npcapSvc.Status.ToString() } else { "NotInstalled" }
+
+        # 4. Sysmon service availability
+        $sysmonSvc = Get-Service -Name "Sysmon", "Sysmon64" -ErrorAction SilentlyContinue | Select-Object -First 1
+        $sysmonAvail = ($null -ne $sysmonSvc -and $sysmonSvc.Status -eq 'Running')
+        $sysmonStatus = if ($sysmonSvc) { $sysmonSvc.Status.ToString() } else { "NotInstalled" }
+        $sysmonName = if ($sysmonSvc) { $sysmonSvc.Name } else { $null }
+
+        $tools = @{
+            procmon = @{
+                available = [bool]$procmonAvail
+                path      = $ProcmonPath
+                version   = $procmonVersion
+            }
+            tshark = @{
+                available = [bool]$tsharkAvail
+                path      = $TsharkPath
+                version   = $tsharkVersion
+            }
+            npcap = @{
+                available      = [bool]$npcapAvail
+                service_status = $npcapStatus
+            }
+            sysmon = @{
+                available      = [bool]$sysmonAvail
+                service_name   = $sysmonName
+                service_status = $sysmonStatus
+                channel        = $SysmonLog
+            }
+        }
+
+        return New-SuccessEnvelope -Data @{ tools = $tools }
+    } catch {
+        return New-ErrorEnvelope -ErrorCode $Script:ErrorCodes.InternalError -ErrorMessage $_.Exception.Message
+    }
+}
+
+Export-ModuleMember -Function Get-DiagnosticsToken, Get-DiagnosticsServices, Get-DiagnosticsDrivers, Get-DiagnosticsTools

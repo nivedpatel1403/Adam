@@ -38,14 +38,17 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
-from datetime import datetime
-from typing import Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from adam.contracts.mutation import MutationResult
 from adam.contracts.raw_event import RawEvent
 from adam.contracts.session import SampleRef
-from adam.contracts.mutation import MutationResult
+
+if TYPE_CHECKING:
+    from adam.contracts.policy_decision import PolicyDecision
+    from adam.contracts.semantic_event import SemanticEvent
 
 
 # ---------------------------------------------------------------------------
@@ -156,8 +159,8 @@ class IPolicyEngine(ABC):
 
     @abstractmethod
     def evaluate(
-        self, event: "SemanticEvent", context: "SessionContextProtocol"
-    ) -> list["PolicyDecision"]:
+        self, event: SemanticEvent, context: SessionContextProtocol
+    ) -> list[PolicyDecision]:
         ...
 
 
@@ -172,13 +175,13 @@ class IPredicate(ABC):
     """A named, pure, side-effect-free escape hatch used inside `when.custom`."""
 
     @abstractmethod
-    def __call__(self, event: "SemanticEvent", context: "SessionContextProtocol") -> bool:
+    def __call__(self, event: SemanticEvent, context: SessionContextProtocol) -> bool:
         ...
 
 
 class IDeceptionEngine(ABC):
     @abstractmethod
-    def execute(self, decision: "PolicyDecision") -> MutationResult:
+    def execute(self, decision: PolicyDecision) -> MutationResult:
         ...
 
 
@@ -210,7 +213,7 @@ class SessionContextProtocol(ABC):
         ...
 
     @abstractmethod
-    def record_decision(self, decision: "PolicyDecision") -> None:
+    def record_decision(self, decision: PolicyDecision) -> None:
         ...
 
 
