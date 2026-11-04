@@ -1,14 +1,15 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import ClassVar
 
-from .base import BaseDetector
 from ..models import SemanticEvent
+from .base import BaseDetector
 
 
 class ReconDetector(BaseDetector):
 
-    RECON_COMMANDS = {
+    RECON_COMMANDS: ClassVar[dict[str, str]] = {
         "whoami.exe",
         "hostname.exe",
         "ipconfig.exe",

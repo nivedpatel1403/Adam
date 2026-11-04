@@ -179,6 +179,7 @@ _ENDPOINT_MODELS: dict[tuple[str, str], tuple[type[hm.BaseModel] | None, type[hm
     ("GET", "/diagnostics/token"): (None, hm.TokenData),
     ("GET", "/diagnostics/services"): (None, hm.ServicesData),
     ("GET", "/diagnostics/drivers"): (None, hm.DriversData),
+    ("GET", "/diagnostics/tools"): (None, hm.ToolsDiagnosticsData),
     ("POST", "/sample/upload"): (hm.SampleUploadRequest, hm.SampleUploadData),
     ("POST", "/sample/stage"): (hm.SampleStageRequest, hm.SampleStageData),
     ("GET", "/artifact/list"): (None, hm.ArtifactListData),
@@ -232,7 +233,7 @@ def test_health_and_version_models_match_spec() -> None:
 
     version_example = re.search(r'"agent_version":\s*"[^"]+",\s*"api_version":\s*"[^"]+"', text)
     assert version_example is not None, "docs/phase5-http-agent-api.md's /version example block not found or changed shape"
-    assert set(hm.VersionData.model_fields.keys()) == {"agent_version", "api_version"}
+    assert set(hm.VersionData.model_fields.keys()) == {"agent_version", "api_version", "build_id", "capabilities"}
 
 
 def test_no_endpoint_models_are_unmapped_or_orphaned() -> None:

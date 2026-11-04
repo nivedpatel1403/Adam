@@ -51,7 +51,7 @@ from __future__ import annotations
 import logging
 import re
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 from xml.etree import ElementTree
 
@@ -163,7 +163,7 @@ def _parse_system_time(raw: str) -> datetime:
 
     dt = datetime.fromisoformat(f"{base}.{frac}")
     if offset is None or offset == "Z":
-        return dt.replace(tzinfo=timezone.utc)
+        return dt.replace(tzinfo=UTC)
     if ":" not in offset:
         offset = f"{offset[:3]}:{offset[3:]}"
     return datetime.fromisoformat(f"{base}.{frac}{offset}")
@@ -249,7 +249,7 @@ def parse_sysmon_event_xml(
         source_event_id=source_event_id,
         category=category,
         occurred_at=occurred_at,
-        observed_at=datetime.now(timezone.utc),
+        observed_at=datetime.now(UTC),
         process=process,
         attributes={k: v for k, v in data_elements.items() if k not in {
             "ProcessId", "ParentProcessId", "Image", "CommandLine", "IntegrityLevel", "User", "ProcessGuid",
@@ -258,7 +258,7 @@ def parse_sysmon_event_xml(
     )
 
 
-def iter_evtx_records(evtx_path: str) -> "Iterator[str]":
+def iter_evtx_records(evtx_path: str) -> Iterator[str]:
     """
     Yields the raw XML string of each record in a real Sysmon .evtx file, in
     file order. Thin wrapper around python-evtx -- see module docstring for

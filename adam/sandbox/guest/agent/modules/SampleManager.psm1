@@ -1,4 +1,4 @@
-#requires -Version 5.1
+﻿#requires -Version 5.1
 <#
 .SYNOPSIS
     SampleManager.psm1 -- implements docs/phase5-http-agent-api.md

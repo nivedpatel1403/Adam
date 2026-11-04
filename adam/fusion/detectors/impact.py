@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import ClassVar
+
 from ..models import RawEvent, SemanticEvent
 from .base import BaseDetector
 
@@ -14,7 +16,7 @@ class ImpactDetector(BaseDetector):
 
     TECHNIQUE_ID = "T1486"
 
-    STRONG_INDICATORS = [
+    STRONG_INDICATORS: ClassVar[dict[str, str]] = [
         "vssadmin delete shadows",
         "cipher /w",
         "bcdedit",
@@ -22,7 +24,7 @@ class ImpactDetector(BaseDetector):
         "encryptor.exe",
     ]
 
-    MEDIUM_INDICATORS = [
+    MEDIUM_INDICATORS: ClassVar[dict[str, str]] = [
         ".locked",
         ".encrypted",
         ".crypt",
@@ -30,7 +32,7 @@ class ImpactDetector(BaseDetector):
         "delete shadows",
     ]
 
-    WEAK_INDICATORS = [
+    WEAK_INDICATORS: ClassVar[dict[str, str]] = [
         "rename",
         "overwrite",
         "wipe",

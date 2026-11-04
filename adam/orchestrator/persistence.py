@@ -19,6 +19,7 @@ running blocking work without blocking the event loop.
 from __future__ import annotations
 
 import asyncio
+from contextlib import ExitStack
 from pathlib import Path
 from typing import TextIO
 
@@ -37,6 +38,7 @@ class RawEventWriter:
         self._path = Path(path)
         self._file: TextIO | None = None
         self._count = 0
+        self._stack = ExitStack()
 
     @property
     def path(self) -> Path:
@@ -53,7 +55,7 @@ class RawEventWriter:
 
     def _open_sync(self) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        self._file = open(self._path, "a", encoding="utf-8")
+        self._file = self._stack.enter_context(self._path.open("a", encoding="utf-8"))
 
     async def write(self, event: RawEvent) -> None:
         """Appends one RawEvent as a single JSONL line and flushes immediately (durability over throughput at this scale)."""
@@ -63,9 +65,17 @@ class RawEventWriter:
 
     def _write_sync(self, event: RawEvent) -> None:
         assert self._file is not None
-        self._file.write(event.model_dump_json())
-        self._file.write("\n")
-        self._file.flush()
+        position = self._file.tell()
+        try:
+            self._file.write(event.model_dump_json() + "\n")
+            self._file.flush()
+        except OSError:
+            # A partial disk write must not leave an invalid JSON fragment
+            # ahead of a subsequently successful retry.
+            self._file.seek(position)
+            self._file.truncate(position)
+            self._file.flush()
+            raise
         self._count += 1
 
     async def close(self) -> None:
@@ -73,5 +83,5 @@ class RawEventWriter:
 
     def _close_sync(self) -> None:
         if self._file is not None:
-            self._file.close()
+            self._stack.close()
             self._file = None

@@ -55,7 +55,7 @@ from typing import Protocol, runtime_checkable
 
 from adam.sandbox.guest.agent.agent import TelemetryArtifacts, ToolAvailability
 
-__all__ = ["GuestChannel", "ToolAvailability", "TelemetryArtifacts", "InMemoryGuestChannel"]
+__all__ = ["GuestChannel", "InMemoryGuestChannel", "TelemetryArtifacts", "ToolAvailability"]
 
 
 @runtime_checkable
@@ -89,9 +89,10 @@ class GuestChannel(Protocol):
         *,
         capture_procmon: bool = True,
         capture_network: bool = True,
-    ) -> None:
+    ) -> dict[str, bool] | None:
         """
-        Start Procmon (backing-file mode) and/or tshark capture for this
+        Return confirmed source start flags when supported (legacy backends
+        may return None). Start Procmon (backing-file mode) and/or tshark for this
         session, before the sample is detonated. Best-effort per source --
         a failure starting one capture must not raise and must not
         prevent the other from being attempted (ARCHITECTURE.md's "support

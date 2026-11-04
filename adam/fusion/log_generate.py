@@ -24,9 +24,9 @@ import argparse
 import json
 import random
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any
 
 random.seed(42)
 
@@ -75,7 +75,7 @@ def make_event(
     ppid: int,
     event_type: str = "process_create",
     **extra: Any,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     record = {
         "event_id": str(uuid.uuid4()),
         "timestamp": _iso(timestamp),
@@ -91,9 +91,9 @@ def make_event(
     return record
 
 
-def generate_benign_events(count: int, start: datetime) -> List[Dict[str, Any]]:
+def generate_benign_events(count: int, start: datetime) -> list[dict[str, Any]]:
     """Ordinary day-to-day activity across normal workstations/servers."""
-    events: List[Dict[str, Any]] = []
+    events: list[dict[str, Any]] = []
     t = start
     for _ in range(count):
         host = random.choice(BENIGN_HOSTS)
@@ -116,13 +116,13 @@ def generate_benign_events(count: int, start: datetime) -> List[Dict[str, Any]]:
     return events
 
 
-def generate_attack_chain(host: str, user: str, start: datetime) -> List[Dict[str, Any]]:
+def generate_attack_chain(host: str, user: str, start: datetime) -> list[dict[str, Any]]:
     """
     A single, coherent multi-stage attack on one host, in order, so the
     sliding window / process tree / correlator all have realistic
     structure to work with (shared pid/ppid lineage, tight timestamps).
     """
-    events: List[Dict[str, Any]] = []
+    events: list[dict[str, Any]] = []
     t = start
     root_pid = _rand_pid()
 
@@ -214,9 +214,9 @@ def main() -> None:
     parser.add_argument("--count", type=int, default=1000, help="Total number of log records")
     args = parser.parse_args()
 
-    start = datetime(2026, 8, 5, 9, 0, 0, tzinfo=timezone.utc)
+    start = datetime(2026, 8, 5, 9, 0, 0, tzinfo=UTC)
 
-    attack_events: List[Dict[str, Any]] = []
+    attack_events: list[dict[str, Any]] = []
     for host in ATTACK_HOSTS:
         attack_events.extend(generate_attack_chain(host, "j.smith", start + timedelta(minutes=random.randint(0, 120))))
 

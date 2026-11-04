@@ -1,4 +1,4 @@
-#requires -Version 5.1
+﻿#requires -Version 5.1
 <#
 .SYNOPSIS
     ProcmonManager.psm1 -- implements docs/phase5-http-agent-api.md
@@ -36,6 +36,9 @@ function Invoke-ProcmonStart {
         return New-ErrorEnvelope -ErrorCode $Script:ErrorCodes.ToolUnavailable -ErrorMessage "Procmon not found at $ProcmonPath"
     }
     try {
+        if (Get-Process -Name 'Procmon', 'Procmon64', 'Procmon64a' -ErrorAction SilentlyContinue) {
+            return New-ErrorEnvelope -ErrorCode $Script:ErrorCodes.ToolUnavailable -ErrorMessage "An existing Procmon instance is running; refusing to take ownership"
+        }
         $args = @('/AcceptEula', '/Quiet', '/Minimized', '/BackingFile', $BackingFile)
         $result = Invoke-NativeProcess -FilePath $ProcmonPath -ArgumentList $args -TimeoutMs $null
         if ($null -eq $result.Pid) {
@@ -58,6 +61,14 @@ function Invoke-ProcmonStop {
         return New-ErrorEnvelope -ErrorCode $Script:ErrorCodes.ToolUnavailable -ErrorMessage "Procmon not found at $ProcmonPath"
     }
     try {
+        if (-not $Script:RunningCaptures.ContainsKey($SessionId)) {
+            return New-SuccessEnvelope -Data @{ stopped = $true }
+        }
+        $ownedPid = $Script:RunningCaptures[$SessionId]
+        $unowned = @(Get-Process -Name 'Procmon', 'Procmon64', 'Procmon64a' -ErrorAction SilentlyContinue | Where-Object { $_.Id -ne $ownedPid })
+        if ($unowned.Count -gt 0) {
+            return New-ErrorEnvelope -ErrorCode $Script:ErrorCodes.InternalError -ErrorMessage "Unowned Procmon process found; refusing global termination"
+        }
         # /Terminate always carries /AcceptEula too -- see module docstring.
         $args = @('/AcceptEula', '/Terminate')
         $result = Invoke-NativeProcess -FilePath $ProcmonPath -ArgumentList $args -TimeoutMs 15000
@@ -70,9 +81,6 @@ function Invoke-ProcmonStop {
                 try { $proc.WaitForExit(5000) | Out-Null } catch { }
             }
             $Script:RunningCaptures.Remove($SessionId) | Out-Null
-        }
-        foreach ($p in (Get-Process -Name 'Procmon', 'Procmon64' -ErrorAction SilentlyContinue)) {
-            try { $p.WaitForExit(3000) | Out-Null } catch { }
         }
         Start-Sleep -Milliseconds 500
 

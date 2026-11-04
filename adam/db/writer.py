@@ -13,15 +13,15 @@ import aiosqlite
 
 from adam.common.bus import EventBus
 from adam.contracts.envelope import Envelope
+from adam.contracts.mutation import MutationResult
+from adam.contracts.policy_decision import PolicyDecision
 from adam.contracts.raw_event import RawEvent
 from adam.contracts.semantic_event import SemanticEvent
-from adam.contracts.policy_decision import PolicyDecision
-from adam.contracts.mutation import MutationResult
 from adam.db.repositories.sqlite import (
-    SQLiteSessionRepository,
-    SQLiteEventRepository,
     SQLiteDecisionRepository,
-    SQLiteMutationRepository
+    SQLiteEventRepository,
+    SQLiteMutationRepository,
+    SQLiteSessionRepository,
 )
 
 logger = logging.getLogger(__name__)
@@ -46,6 +46,8 @@ class DBWriter:
         self.task: asyncio.Task[None] | None = None
         self.dropped_raw_events = 0
         self._overflow_warned = False
+        self._flush_lock = asyncio.Lock()
+        self._stopping = False
         
         self.session_repo = SQLiteSessionRepository(db)
         self.event_repo = SQLiteEventRepository(db)
@@ -106,21 +108,28 @@ class DBWriter:
         except ImportError:
             pass
             
+        self._stopping = False
         self.task = asyncio.create_task(self._write_loop(), name="adam.db.writer")
 
     async def _write_loop(self) -> None:
-        while True:
+        while not self._stopping:
             try:
                 await asyncio.wait_for(self.item_added.wait(), timeout=self.flush_interval_s)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 pass # Flush interval reached, flush what we have
             except asyncio.CancelledError:
                 break
                 
             self.item_added.clear()
+            if self._stopping:
+                break
             await self.flush()
 
     async def flush(self) -> None:
+        async with self._flush_lock:
+            await self._flush_batch()
+
+    async def _flush_batch(self) -> None:
         if not self.queue:
             return
             
@@ -147,6 +156,7 @@ class DBWriter:
             await self.db.commit()
             self._commit_warned = False
         except Exception:
+            logging.getLogger(__name__).exception("Operation failed; applying documented fallback")
             await self.db.rollback()
             # Push the uncommitted batch back to the front of the queue to retry
             for item in reversed(batch):
@@ -159,12 +169,15 @@ class DBWriter:
     async def stop(self) -> None:
         """Stop the writer task and flush remaining items."""
         if self.task:
-            self.task.cancel()
-            try:
-                await self.task
-            except asyncio.CancelledError:
-                pass
+            self._stopping = True
+            self.item_added.set()
+            await asyncio.wait_for(asyncio.shield(self.task), timeout=60)
             self.task = None
             
+        failures = 0
         while self.queue:
+            before = len(self.queue)
             await self.flush()
+            failures = failures + 1 if len(self.queue) >= before else 0
+            if failures >= 3:
+                raise RuntimeError(f"Database could not persist {len(self.queue)} queued records after three retries")

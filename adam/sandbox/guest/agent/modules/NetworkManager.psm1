@@ -1,4 +1,4 @@
-#requires -Version 5.1
+﻿#requires -Version 5.1
 <#
 .SYNOPSIS
     NetworkManager.psm1 -- implements docs/phase5-http-agent-api.md
@@ -50,6 +50,11 @@ function Resolve-HostOnlyInterfaceIndex {
             $ipObj = Get-NetIPAddress -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress -like '192.168.19.*' } | Select-Object -First 1
             if ($ipObj) {
                 $hostOnlyAlias = $ipObj.InterfaceAlias
+                $adapter = Get-NetAdapter -InterfaceIndex $ipObj.InterfaceIndex -ErrorAction Stop
+                $guid = $adapter.InterfaceGuid.ToString().Trim('{}')
+                foreach ($iface in $interfaces) {
+                    if ($iface.description -match [regex]::Escape($guid)) { return $iface.index }
+                }
             }
         } catch { }
 
@@ -61,21 +66,7 @@ function Resolve-HostOnlyInterfaceIndex {
             }
         }
 
-        # Match description with Ethernet or 192.168.19. (excluding loopback)
-        foreach ($iface in $interfaces) {
-            if (($iface.description -match 'Ethernet|192\.168\.19\.') -and ($iface.description -notmatch 'loopback|Loopback')) {
-                return $iface.index
-            }
-        }
-
-        # Fallback to first non-loopback interface
-        foreach ($iface in $interfaces) {
-            if ($iface.description -notmatch 'loopback|Loopback') {
-                return $iface.index
-            }
-        }
-
-        return $interfaces[0].index
+        return $null
     } catch {
         return $null
     }
@@ -116,6 +107,9 @@ function Invoke-NetworkStart {
     try {
         $targetInterface = $Interface
         $matchedIndex = Resolve-HostOnlyInterfaceIndex -TsharkPath $TsharkPath
+        if ($targetInterface -eq 'auto' -and -not $matchedIndex) {
+            return New-ErrorEnvelope -ErrorCode $Script:ErrorCodes.ToolUnavailable -ErrorMessage 'Host-only capture interface could not be resolved'
+        }
         if ($matchedIndex) {
             if ([string]::IsNullOrWhiteSpace($targetInterface) -or $targetInterface -eq 'auto') {
                 $targetInterface = $matchedIndex
@@ -140,7 +134,12 @@ function Invoke-NetworkStart {
         if ($null -eq $result.Pid) {
             return New-ErrorEnvelope -ErrorCode $Script:ErrorCodes.InternalError -ErrorMessage $result.StdErr
         }
-        $Script:RunningCaptures[$SessionId] = $result.Pid
+        Start-Sleep -Milliseconds 500
+        $children = @(Get-CimInstance Win32_Process -Filter "ParentProcessId=$($result.Pid) AND Name='dumpcap.exe'" | ForEach-Object { Get-Process -Id $_.ProcessId -ErrorAction SilentlyContinue })
+        if ($result.Process.HasExited) {
+            return New-ErrorEnvelope -ErrorCode $Script:ErrorCodes.ToolUnavailable -ErrorMessage "tshark exited before capture became ready"
+        }
+        $Script:RunningCaptures[$SessionId] = @{ Process = $result.Process; Children = $children }
         Write-AgentLog -Message "session=$SessionId tshark started pid=$($result.Pid) interface=$targetInterface pcap=$PcapPath"
         return New-SuccessEnvelope -Data @{ pid = $result.Pid }
     } catch {
@@ -155,8 +154,8 @@ function Invoke-NetworkStop {
         # performs the capture -- stop gracefully to flush capture buffers.
         $stoppedAny = $false
         if ($Script:RunningCaptures.ContainsKey($SessionId)) {
-            $tsharkPid = $Script:RunningCaptures[$SessionId]
-            $proc = Get-Process -Id $tsharkPid -ErrorAction SilentlyContinue
+            $capture = $Script:RunningCaptures[$SessionId]
+            $proc = $capture.Process
             if ($proc) {
                 try {
                     $proc.CloseMainWindow() | Out-Null
@@ -168,9 +167,7 @@ function Invoke-NetworkStop {
                 }
                 $stoppedAny = $true
             }
-            $Script:RunningCaptures.Remove($SessionId) | Out-Null
-        }
-        foreach ($dumpcap in (Get-Process -Name 'dumpcap' -ErrorAction SilentlyContinue)) {
+        foreach ($dumpcap in $capture.Children) {
             try {
                 $dumpcap.CloseMainWindow() | Out-Null
                 $dumpcap.WaitForExit(2000) | Out-Null
@@ -181,6 +178,8 @@ function Invoke-NetworkStop {
             } else {
                 $stoppedAny = $true
             }
+        }
+            $Script:RunningCaptures.Remove($SessionId) | Out-Null
         }
         # Allow buffer flush to disk
         Start-Sleep -Milliseconds 500

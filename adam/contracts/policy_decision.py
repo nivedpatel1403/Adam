@@ -8,8 +8,8 @@ LOCAL STUB — see enums.py note.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from typing import Any, Optional
+from datetime import UTC, datetime
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -23,10 +23,10 @@ class PolicyDecision(BaseModel):
     triggered_by: str  # semantic_id of the SemanticEvent that caused this
     rule_id: str
     rule_version: str
-    action: Optional[str] = None  # name of a deception primitive, e.g. SPAWN_FAKE_DC_ARTIFACTS
+    action: str | None = None  # name of a deception primitive, e.g. SPAWN_FAKE_DC_ARTIFACTS
     verdict: Verdict
     priority: int = 0
     parameters: dict[str, Any] = Field(default_factory=dict)
     rationale: str
-    decided_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    decided_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     evaluation_ms: float = 0.0

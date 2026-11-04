@@ -1,33 +1,22 @@
-import streamlit as st
-import requests
-import time
-import pandas as pd
 import asyncio
-import subprocess
-import re
+import logging
 import os
+import re
+import subprocess
 import sys
-from datetime import datetime, timezone
-import httpx
+from datetime import UTC, datetime
 from pathlib import Path
+
+import httpx
+import streamlit as st
 
 # Add project root to path so we can import adam modules
 sys.path.insert(0, os.path.abspath("."))
 
 # Import ADAM components
-from adam.sandbox.vbox.client import VirtualBoxClient
-from adam.sandbox.controller import SandboxController
 from adam.common.config import get_settings
-from adam.api.deps import init_dependencies, deps, shutdown_dependencies
 from adam.reporting.generator import ReportGenerator
-from adam.contracts.session import SampleRef, SessionConfig, AnalysisSession, SessionMetrics
-from adam.contracts.enums import Arm, NetworkMode, SessionStatus
-from adam.orchestrator.session import SessionOrchestrator, new_session_id
-from adam.orchestrator.runner import sample_ref_from_path
-from adam.pipeline.wiring import wire_engines
-from adam.fusion.engine import EventFusionEngine
-from adam.policy.engine import PolicyEngine
-from adam.deception.engine import DeceptionEngine
+from adam.sandbox.vbox.client import VirtualBoxClient
 
 st.set_page_config(
     page_title="ADAM Adaptive Deception Panel",
@@ -249,14 +238,15 @@ def format_local_time(dt, include_date=True, include_ms=False):
         return "N/A"
     if isinstance(dt, str):
         try:
-            dt = datetime.fromisoformat(dt.replace("Z", "+00:00"))
+            dt = datetime.fromisoformat(dt)
         except Exception:
+            logging.getLogger(__name__).exception("Operation failed; applying documented fallback")
             return dt
     try:
         if hasattr(dt, "tzinfo") and dt.tzinfo is not None:
             local_dt = dt.astimezone()
         else:
-            local_dt = dt.replace(tzinfo=timezone.utc).astimezone()
+            local_dt = dt.replace(tzinfo=UTC).astimezone()
         
         if include_ms:
             fmt = "%Y-%m-%d %H:%M:%S.%f" if include_date else "%H:%M:%S.%f"
@@ -266,6 +256,7 @@ def format_local_time(dt, include_date=True, include_ms=False):
             tz_str = local_dt.strftime("%Z") or "Local"
             return f"{local_dt.strftime(fmt)} ({tz_str})"
     except Exception:
+        logging.getLogger(__name__).exception("Operation failed; applying documented fallback")
         return str(dt)
 
 # VM Status retriever
@@ -287,6 +278,7 @@ def get_vm_status():
         else:
             vm_state = "Off"
     except Exception:
+        logging.getLogger(__name__).exception("Operation failed; applying documented fallback")
         vm_state = "Unknown"
         
     if vm_state == "Running":
@@ -295,7 +287,7 @@ def get_vm_status():
             if resp.status_code == 200 and resp.json().get("success"):
                 agent_healthy = True
         except Exception:
-            pass
+            logging.getLogger(__name__).exception("Operation failed; applying documented fallback")
             
     try:
         snapshots = run_async(client.list_snapshots(vm_name))
@@ -304,7 +296,7 @@ def get_vm_status():
                 current_snapshot = s.name
                 break
     except Exception:
-        pass
+        logging.getLogger(__name__).exception("Operation failed; applying documented fallback")
         
     return vm_state, agent_healthy, current_snapshot
 
@@ -331,8 +323,7 @@ async def execute_live_session(sample_input, profile_name, deception_enabled, st
         upload_dir = Path("samples/uploaded")
         upload_dir.mkdir(parents=True, exist_ok=True)
         staged_path = upload_dir / sample_input.name
-        with open(staged_path, "wb") as f:
-            f.write(sample_input.getvalue())
+        await asyncio.to_thread(staged_path.write_bytes, sample_input.getvalue())
         host_sample_path = str(staged_path.resolve())
         if status_container:
             status_container.info(f"📁 Staged uploaded sample to `{host_sample_path}`")
@@ -361,8 +352,12 @@ async def execute_live_session(sample_input, profile_name, deception_enabled, st
 # Retrieve session details and multi-format reports for display
 async def get_session_details(session_id):
     import aiosqlite
+
     from adam.db.repositories.sqlite import (
-        SQLiteSessionRepository, SQLiteEventRepository, SQLiteDecisionRepository, SQLiteMutationRepository
+        SQLiteDecisionRepository,
+        SQLiteEventRepository,
+        SQLiteMutationRepository,
+        SQLiteSessionRepository,
     )
     settings = get_settings()
     async with aiosqlite.connect(settings.db.path) as db:
@@ -389,6 +384,7 @@ async def get_session_details(session_id):
 # Retrieve list of all available sessions (newest first)
 async def get_all_sessions():
     import aiosqlite
+
     from adam.db.repositories.sqlite import SQLiteSessionRepository
     settings = get_settings()
     async with aiosqlite.connect(settings.db.path) as db:
@@ -490,12 +486,13 @@ with st.sidebar:
         sidebar_status.info("⏳ Restoring VM snapshot, booting, and running live analysis...")
         try:
             session_id, session = run_async(execute_live_session(sample_to_run, profile_choice, deception_choice, sidebar_status))
-            sidebar_status.success(f"✅ Detonation complete!")
+            sidebar_status.success("✅ Detonation complete!")
             st.session_state.last_session_id = session_id
             st.session_state.history_session_selector = session_id
             st.session_state.session_type = "live"
             st.rerun()
         except Exception as e:
+            logging.getLogger(__name__).exception("Operation failed; applying documented fallback")
             sidebar_status.error(f"❌ Detonation failed: {e}")
 
     col_act1, col_act2 = st.columns(2)
@@ -504,12 +501,12 @@ with st.sidebar:
             sidebar_status.info("⏳ Running replay...")
             res = subprocess.run(
                 [sys.executable, "-m", "adam.cli.main", "replay", "synthetic"],
-                capture_output=True, text=True
+                capture_output=True, text=True, check=False
             )
             match = re.search(r"Session ID: (replay_\w+)", res.stdout)
             if match:
                 session_id = match.group(1)
-                sidebar_status.success(f"✅ Replay complete!")
+                sidebar_status.success("✅ Replay complete!")
                 st.session_state.last_session_id = session_id
                 st.session_state.history_session_selector = session_id
                 st.session_state.session_type = "replay"
@@ -527,6 +524,7 @@ with st.sidebar:
                 sidebar_status.success("✅ Reset clean!")
                 st.rerun()
             except Exception as e:
+                logging.getLogger(__name__).exception("Operation failed; applying documented fallback")
                 sidebar_status.error(f"❌ Reset failed: {e}")
 
     st.markdown("---")
@@ -750,22 +748,22 @@ else:
         for e in events:
             target = None
             op = "Observed Access"
-            if "target_object" in e.features and e.features["target_object"]:
+            if e.features.get("target_object"):
                 target = e.features["target_object"]
                 op = "File/Registry Access"
-            elif "TargetFilename" in e.features and e.features["TargetFilename"]:
+            elif e.features.get("TargetFilename"):
                 target = e.features["TargetFilename"]
                 op = "File Read/Write"
-            elif "TargetObject" in e.features and e.features["TargetObject"]:
+            elif e.features.get("TargetObject"):
                 target = e.features["TargetObject"]
                 op = "Registry Read/Write"
-            elif "network_endpoint" in e.features and e.features["network_endpoint"]:
+            elif e.features.get("network_endpoint"):
                 target = e.features["network_endpoint"]
                 op = "Network Connect"
-            elif "DestinationIp" in e.features and e.features["DestinationIp"]:
+            elif e.features.get("DestinationIp"):
                 target = f"{e.features.get('DestinationIp')}:{e.features.get('DestinationPort', '')}"
                 op = "Network Connect"
-            elif "QueryName" in e.features and e.features["QueryName"]:
+            elif e.features.get("QueryName"):
                 target = e.features["QueryName"]
                 op = "DNS Query"
             elif e.intent:
@@ -955,6 +953,7 @@ else:
                 st.caption(f"📁 Local Artifact Path: `{raw_jsonl_path.resolve()}`")
 
     except Exception as e:
+        logging.getLogger(__name__).exception("Operation failed; applying documented fallback")
         st.error(f"Failed to fetch session details: {e}")
 
 

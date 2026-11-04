@@ -491,7 +491,9 @@ async def test_multipage_sysmon_events_draining_and_reset() -> None:
     assert isinstance(result, SysmonEventsResult)
     last_id, events = result
     assert last_id == 240
-    assert len(events) == 240
+    # Do not assign already-read old-generation records to the reset log.
+    assert len(events) == 40
+    assert all(item.record_id >= 201 for item in events)
     assert result.log_reset is True
     assert calls == [0, 100, 200]
 
@@ -551,11 +553,9 @@ async def test_multipage_sysmon_events_midway_transport_failure() -> None:
         retry_attempts=1,
     )
 
-    result = await ch.get_sysmon_events_since(record_id=0)
-    last_id, events = result
-    # Drained first page (100 events), preserved checkpoint at 100, did not raise
-    assert last_id == 100
-    assert len(events) == 100
+    # A partial page must not disguise a failed source as a successful poll.
+    with pytest.raises(RuntimeError, match="Sysmon polling failed"):
+        await ch.get_sysmon_events_since(record_id=0)
 
 
 @pytest.mark.asyncio

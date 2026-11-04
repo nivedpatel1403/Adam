@@ -1,4 +1,4 @@
-#requires -Version 5.1
+﻿#requires -Version 5.1
 <#
 .SYNOPSIS
     Common.psm1 -- shared envelope/error/logging helpers for every guest
@@ -389,7 +389,7 @@ function Invoke-NativeProcess {
         # Detached launch (Procmon/tshark capture start) -- do not wait,
         # do not read stdout/stderr streams (that would block on a
         # process that's expected to keep running).
-        return @{ Pid = $processId; Exited = $false; ExitCode = $null; StdOut = ''; StdErr = ''; TimedOut = $false }
+        return @{ Pid = $processId; Exited = $false; ExitCode = $null; StdOut = ''; StdErr = ''; TimedOut = $false; Process = $process }
     }
 
     $stdOutTask = $process.StandardOutput.ReadToEndAsync()

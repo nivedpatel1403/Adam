@@ -56,6 +56,7 @@ import inspect
 import logging
 import time
 from collections.abc import Coroutine
+from dataclasses import replace
 from typing import Any
 
 from adam.common.errors import ContractViolationError
@@ -192,10 +193,14 @@ class SandboxController:
             # Apply profile hardware if specified
             if getattr(self, "vm_profile", None) and self.vm_profile != "bare_control":
                 try:
-                    from adam.sandbox.vbox.profile_applier import load_profile, apply_profile_hardware
+                    from adam.sandbox.vbox.profile_applier import (
+                        apply_profile_hardware,
+                        load_profile,
+                    )
                     profile = load_profile(f"win10_x64_{self.vm_profile}")
                     await apply_profile_hardware(self._client, self._vm_name, profile)
                 except Exception as e:
+                    logging.getLogger(__name__).exception("Operation failed; applying documented fallback")
                     logger.warning("Failed to apply profile hardware: %s", e)
 
             self._state = SandboxState.BOOTING
@@ -235,21 +240,25 @@ class SandboxController:
             # Apply profile persona if specified
             if getattr(self, "vm_profile", None) and self.vm_profile != "bare_control":
                 try:
-                    from adam.sandbox.vbox.profile_applier import load_profile, apply_profile_persona
+                    from adam.sandbox.vbox.profile_applier import (
+                        apply_profile_persona,
+                        load_profile,
+                    )
                     profile = load_profile(f"win10_x64_{self.vm_profile}")
                     await apply_profile_persona(self._guest_channel, profile)
                 except Exception as e:
+                    logging.getLogger(__name__).exception("Operation failed; applying documented fallback")
                     logger.warning("Failed to apply profile persona: %s", e)
 
         except Exception as exc:
             try:
                 await self._client.stop(self._vm_name, mode="poweroff")
             except Exception:
-                pass
+                logging.getLogger(__name__).exception("Operation failed; applying documented fallback")
             try:
                 await self._client.restore_snapshot(self._vm_name, self._snapshot_name)
             except Exception:
-                pass
+                logging.getLogger(__name__).exception("Operation failed; applying documented fallback")
             self._state = SandboxState.ERROR
             if isinstance(exc, SandboxOperationError):
                 raise
@@ -299,11 +308,11 @@ class SandboxController:
             try:
                 await self._client.stop(self._vm_name, mode="poweroff")
             except Exception:
-                pass
+                logging.getLogger(__name__).exception("Operation failed; applying documented fallback")
             try:
                 await self._client.restore_snapshot(self._vm_name, self._snapshot_name)
             except Exception:
-                pass
+                logging.getLogger(__name__).exception("Operation failed; applying documented fallback")
             self._state = SandboxState.ERROR
             if isinstance(exc, SandboxOperationError):
                 raise
@@ -327,49 +336,53 @@ class SandboxController:
 
         try:
             if self._guest_channel is not None and hasattr(self._guest_channel, "run_process"):
-                try:
-                    # Launch asynchronously (wait=False) so the single-threaded guest HTTP listener
-                    # is never blocked, allowing live Sysmon polling and live policy containment actions.
-                    start_res = await self._guest_channel.run_process(
-                        executable_path=self._armed_guest_target_path,
-                        arguments=None,
-                        wait=False,
-                        timeout_s=None,
-                    )
-                    target_pid = getattr(start_res, "pid", None)
-                    logger.info("session sample started on guest with PID=%s (detached)", target_pid)
-                    result = start_res
+                # Launch asynchronously (wait=False) so the single-threaded guest HTTP listener
+                # is never blocked, allowing live Sysmon polling and live policy containment actions.
+                start_res = await self._guest_channel.run_process(
+                    executable_path=self._armed_guest_target_path,
+                    arguments=None,
+                    wait=False,
+                    timeout_s=None,
+                )
+                target_pid = getattr(start_res, "pid", None)
+                if target_pid is None:
+                    raise RuntimeError("Guest did not return an owned process PID")
+                logger.info("session sample started on guest with PID=%s (detached)", target_pid)
+                result = start_res
 
-                    # Wait for sample to exit or be killed, polling query_processes every 0.5s up to detonate_timeout
-                    detonate_start = time.monotonic()
-                    while (time.monotonic() - detonate_start) < self._detonate_timeout:
-                        await asyncio.sleep(0.5)
-                        if target_pid is not None and hasattr(self._guest_channel, "query_processes"):
-                            try:
-                                procs = await self._guest_channel.query_processes(pid=target_pid)
-                                if procs == []:
-                                    logger.info(
-                                        "session sample PID=%s exited / was terminated after %.2fs",
-                                        target_pid, time.monotonic() - detonate_start,
-                                    )
-                                    break
-                            except (GuestAgentError, GuestAgentUnreachableError, ContractViolationError) as exc:
-                                logger.debug(
-                                    "transient error querying process pid=%s during detonation wait, continuing to poll: %s",
-                                    target_pid, exc,
+                # Wait for sample to exit or be killed, polling query_processes every 0.5s up to detonate_timeout
+                detonate_start = time.monotonic()
+                while (time.monotonic() - detonate_start) < self._detonate_timeout:
+                    await asyncio.sleep(0.5)
+                    if target_pid is not None and hasattr(self._guest_channel, "query_processes"):
+                        try:
+                            procs = await self._guest_channel.query_processes(pid=target_pid)
+                            if procs == []:
+                                wait_process = getattr(self._guest_channel, "wait_process", None)
+                                if wait_process is not None:
+                                    exit_status = await wait_process(target_pid)
+                                    if isinstance(exit_status, dict) and exit_status.get("exit_code") is not None:
+                                        rc = exit_status["exit_code"]
+                                        result = replace(start_res, return_code=rc, success=rc == 0)
+                                logger.info(
+                                    "session sample PID=%s exited / was terminated after %.2fs",
+                                    target_pid, time.monotonic() - detonate_start,
                                 )
-                except GuestAgentUnreachableError as exc:
-                    logger.warning(
-                        "HTTP guest agent unreachable during detonate(), falling back to guestcontrol run: %s",
-                        exc,
-                    )
-                    result = await self._client.run_in_guest(
-                        self._vm_name,
-                        guest_username=self._guest_username,
-                        guest_password=self._guest_password,
-                        executable_path=self._armed_guest_target_path,
-                        arguments=None,
-                        timeout=self._detonate_timeout,
+                                break
+                        except (GuestAgentError, GuestAgentUnreachableError, ContractViolationError) as exc:
+                            logger.debug(
+                                "transient error querying process pid=%s during detonation wait, continuing to poll: %s",
+                                target_pid, exc,
+                            )
+                else:
+                    terminate = getattr(self._guest_channel, "terminate_process", None)
+                    if terminate is not None:
+                        try:
+                            await asyncio.wait_for(terminate(pid=target_pid), timeout=10.0)
+                        except Exception:
+                            logger.exception("Failed to terminate timed-out owned PID=%s", target_pid)
+                    raise TimeoutError(
+                        f"Process PID={target_pid} did not exit within {self._detonate_timeout}s"
                     )
             else:
                 result = await self._client.run_in_guest(
@@ -380,26 +393,9 @@ class SandboxController:
                     arguments=None,
                     timeout=self._detonate_timeout,
                 )
-        except VBoxCommandError as exc:
-            try:
-                await self._client.stop(self._vm_name, mode="poweroff")
-            except Exception:
-                pass
-            try:
-                await self._client.restore_snapshot(self._vm_name, self._snapshot_name)
-            except Exception:
-                pass
-            self._state = SandboxState.ERROR
-            raise SandboxOperationError("detonate (VBoxManage unreachable)", exc) from exc
         except Exception as exc:
-            try:
-                await self._client.stop(self._vm_name, mode="poweroff")
-            except Exception:
-                pass
-            try:
-                await self._client.restore_snapshot(self._vm_name, self._snapshot_name)
-            except Exception:
-                pass
+            # Keep the guest alive so the orchestrator can export partial captures.
+            # Its finally block owns VM teardown and snapshot restoration.
             self._state = SandboxState.ERROR
             raise SandboxOperationError("detonate", exc) from exc
 
@@ -433,28 +429,44 @@ class SandboxController:
             await reset()
         except Exception:
             logger.exception("controller: guest network redirect cleanup failed")
+            raise
 
     async def teardown(self) -> None:
         """
-        Callable from ANY state, including COLD and ERROR / FAILED.
-        Best-effort stop(poweroff) + restore_snapshot(clean); always ends
-        in COLD. Never raises.
+        Shut down and restore from any state. Attempt recovery on failure,
+        then raise so the session cannot report successful cleanup.
         """
         self._state = SandboxState.TEARING_DOWN
-
+        errors = []
         try:
             state = await self._client.get_state(self._vm_name)
             if state in ("running", "paused", "stuck"):
-                await self._client.stop(self._vm_name, mode="poweroff")
+                result = await self._client.stop(self._vm_name, mode="acpi")
+                if not result.success:
+                    raise RuntimeError(result.stderr)
+                result = await self._client.wait_for_state(self._vm_name, "poweroff", timeout=90)
+                if not result.success:
+                    raise RuntimeError("Guest did not shut down cleanly within 90 seconds")
             elif state == "saved":
-                await self._client.discard_saved_state(self._vm_name)
-        except Exception:
-            pass
-
+                result = await self._client.discard_saved_state(self._vm_name)
+                if not result.success:
+                    raise RuntimeError(result.stderr)
+        except Exception as exc:
+            logging.getLogger(__name__).exception("Operation failed; applying documented fallback")
+            errors.append(str(exc))
+            try:
+                if await self._client.get_state(self._vm_name) != "poweroff":
+                    await self._client.stop(self._vm_name, mode="poweroff")
+            except Exception:
+                logger.exception("Fallback VM poweroff failed")
         try:
-            await self._client.restore_snapshot(self._vm_name, self._snapshot_name)
-        except VBoxCommandError:
-            pass
-
+            result = await self._client.restore_snapshot(self._vm_name, self._snapshot_name)
+            if not result.success:
+                raise RuntimeError(result.stderr)
+        except Exception as exc:
+            logging.getLogger(__name__).exception("Operation failed; applying documented fallback")
+            errors.append(str(exc))
+        if errors:
+            self._state = SandboxState.ERROR
+            raise SandboxOperationError("teardown", RuntimeError("; ".join(errors)))
         self._state = SandboxState.COLD
-

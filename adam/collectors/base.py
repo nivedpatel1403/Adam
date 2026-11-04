@@ -57,6 +57,8 @@ class BaseCollector(abc.ABC):
         self._stopped = asyncio.Event()
         self.dropped = 0
         self.emitted = 0
+        self.errors: list[str] = []
+        self.read_complete = asyncio.Event()
 
     @property
     @abc.abstractmethod
@@ -148,7 +150,8 @@ class BaseCollector(abc.ABC):
             await self._run()
         except asyncio.CancelledError:
             raise
-        except Exception:
+        except Exception as exc:
+            self.errors.append(str(exc))
             logger.exception("collector=%s _run() raised -- collector stopped", self.source_name)
         finally:
             # _run() can finish on its own (e.g. a finite source that reads
@@ -173,7 +176,7 @@ class BaseCollector(abc.ABC):
             return
         try:
             await asyncio.wait_for(asyncio.shield(self._task), timeout=5.0)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.warning(
                 "collector=%s did not exit within 5s of stop(), cancelling", self.source_name
             )
@@ -200,6 +203,6 @@ class BaseCollector(abc.ABC):
                 return
             try:
                 event = await asyncio.wait_for(self._buffer.get(), timeout=0.1)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 continue
             yield event

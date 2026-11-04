@@ -11,7 +11,7 @@ in your own module.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -20,8 +20,8 @@ class Actor(BaseModel):
     pid: int
     # Optional because the live Sysmon payload may not carry an Image or
     # ProcessGuid for every event type.  Never synthesize a System32 path.
-    image: Optional[str] = None
-    guid: Optional[str] = None
+    image: str | None = None
+    guid: str | None = None
 
 
 class AttckRef(BaseModel):
@@ -40,7 +40,7 @@ class SemanticEvent(BaseModel):
     window_end: datetime
     actor: Actor
     evidence: list[str] = Field(default_factory=list)
-    attck: Optional[AttckRef] = None
+    attck: AttckRef | None = None
     detector: str
     features: dict[str, Any] = Field(default_factory=dict)
-    caused_by_mutation: Optional[str] = None
+    caused_by_mutation: str | None = None

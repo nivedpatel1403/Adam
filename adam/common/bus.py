@@ -71,8 +71,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable, TypeVar
+from typing import Any, TypeVar
 
 from adam.contracts.envelope import Envelope
 
@@ -134,6 +135,7 @@ class EventBus:
     def __init__(self) -> None:
         self._subscribers: dict[type[Any], list[_Subscriber]] = {}
         self._started = False
+        self.errors: list[str] = []
 
     def subscribe(
         self,
@@ -190,11 +192,12 @@ class EventBus:
                             await asyncio.wait_for(subscriber.queue.put(message), timeout=put_timeout_s)
                             subscriber.subscription.delivered += 1
                             enqueued = True
-                        except asyncio.TimeoutError:
+                        except TimeoutError:
                             enqueued = False
 
                     if not enqueued:
                         subscriber.subscription.dropped += 1
+                        self.errors.append(f"Queue overflow in subscriber {subscriber.subscription.name}")
                         msg_id = getattr(message, "message_id", "unknown")
                         sess_id = getattr(message, "session_id", "unknown")
                         payload_summary = getattr(message.payload, "decision_id", None) or getattr(message.payload, "event_id", None) or getattr(message.payload, "semantic_id", None) or "n/a"
@@ -239,7 +242,8 @@ class EventBus:
         if joins:
             try:
                 await asyncio.wait_for(asyncio.gather(*joins), timeout=timeout)
-            except asyncio.TimeoutError:
+            except TimeoutError:
+                self.errors.append("Event bus drain timed out with messages pending")
                 logger.warning(
                     "EventBus.drain() timed out after %.1fs with messages still queued", timeout
                 )
@@ -279,7 +283,8 @@ class EventBus:
                 await subscriber.handler(envelope)
             except asyncio.CancelledError:
                 raise
-            except Exception:
+            except Exception as exc:
+                self.errors.append(f"Subscriber {subscriber.subscription.name}: {exc}")
                 logger.exception(
                     "handler error in subscriber=%r for message_type=%s -- "
                     "isolated, other subscribers unaffected",

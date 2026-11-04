@@ -1,16 +1,16 @@
 """
 scripts/verify_candidate_snapshots.py
 
-Automated Verification Harness for ADAM Candidate Snapshots (Requirement R6).
+Verification harness for distinct candidate and recovery snapshots.
 
 Workflow:
-1. Asserts the unregistered ~4 GiB VDI ({c86fbab5-1567-4629-a3c3-5f73b5afbb46}.vdi) exists and records its stat baseline.
+1. Records the unregistered VDI's stat and SHA-256 baseline.
 2. Cycle 1:
    - Restores the candidate snapshot.
    - Verifies pre-clean state (run marker files and registry keys absent).
    - Starts the VM (headless) and waits for guest agent readiness.
    - Executes benign workload with unique run marker 1.
-   - Verifies telemetry ingestion and policy evaluation.
+   - Runs the normal pipeline and correlates actual workload capture evidence.
    - Stops VM cleanly.
 3. Cycle 2:
    - Restores the candidate snapshot.
@@ -19,31 +19,37 @@ Workflow:
    - Verifies clean execution and telemetry.
    - Stops VM cleanly.
 4. Promotion:
-   - Deletes the old recovery snapshot.
-   - Renames candidate snapshot to "clean".
+   - Requires explicit opt-in, distinct UUIDs, and successful verification.
+   - Verifies candidate health, renames by UUID, then deletes only the identified recovery.
    - Verifies exactly one snapshot named "clean" is registered in VirtualBox.
    - Confirms default.toml and development.toml resolve to "clean".
-5. Verifies unregistered ~4 GiB VDI remains completely untouched (size and mtime unchanged).
-6. Writes machine-readable results to logs/candidate-verification/result.json.
+5. Verifies the final baseline boots, stops, and restores to a pristine state.
+6. Verifies the orphan disk's SHA-256 and writes a fresh timestamped result.
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import logging
 import os
+import subprocess
 import sys
 import time
 import uuid
 from pathlib import Path
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from threading import Thread
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 from adam.common.config import get_settings
+from adam.contracts.enums import Arm, SessionStatus
+from adam.orchestrator.runner import Runner
 from adam.sandbox.guest.agent.agent import ToolAvailability
 from adam.sandbox.guest.http_channel import HTTPGuestChannel
 from adam.sandbox.guest.http_models import ExistsData
@@ -58,7 +64,7 @@ logger = logging.getLogger("verify_candidate_snapshots")
 DEFAULT_VDI_PATH = Path(
     r"C:\Users\NIVED\VirtualBox VMs\Windows\Snapshots\{c86fbab5-1567-4629-a3c3-5f73b5afbb46}.vdi"
 )
-DEFAULT_OUTPUT_FILE = _PROJECT_ROOT / "logs" / "candidate-verification" / "result.json"
+DEFAULT_OUTPUT_FILE = _PROJECT_ROOT / "logs" / "repair-verification" / time.strftime("%Y%m%d-%H%M%S") / "result.json"
 
 
 def check_orphan_vdi(vdi_path: Path, baseline_stat: os.stat_result | None = None) -> dict:
@@ -74,6 +80,8 @@ def check_orphan_vdi(vdi_path: Path, baseline_stat: os.stat_result | None = None
     current_stat = vdi_path.stat()
     size_bytes = current_stat.st_size
     mtime = current_stat.st_mtime
+    with vdi_path.open("rb") as stream:
+        sha256 = hashlib.file_digest(stream, "sha256").hexdigest()
 
     untouched = True
     if baseline_stat is not None and (size_bytes != baseline_stat.st_size or mtime != baseline_stat.st_mtime):
@@ -84,6 +92,7 @@ def check_orphan_vdi(vdi_path: Path, baseline_stat: os.stat_result | None = None
         "path": str(vdi_path),
         "size_bytes": size_bytes,
         "mtime": mtime,
+        "sha256": sha256,
         "untouched": untouched,
     }
 
@@ -246,12 +255,14 @@ async def run_benign_workload(
 async def stop_vm_cleanly(
     vbox: VirtualBoxClient,
     vm_name: str,
-    timeout_s: float = 15.0,
+    timeout_s: float = 90.0,
 ) -> bool:
     """Stops VM gracefully via ACPI power button, falling back to poweroff."""
     state = await vbox.get_state(vm_name)
-    if state in ("poweroff", "saved"):
+    if state == "poweroff":
         return True
+    if state == "saved":
+        return False
 
     logger.info("Stopping VM '%s' (current_state=%s)...", vm_name, state)
     await vbox.stop(vm_name, mode="acpi")
@@ -264,7 +275,8 @@ async def stop_vm_cleanly(
     await vbox.stop(vm_name, mode="poweroff")
     res = await vbox.wait_for_state(vm_name, "poweroff", timeout=15.0)
     await asyncio.sleep(3.0)
-    return res.success
+    # The VM is safe to leave powered off, but this was not a clean shutdown.
+    return False
 
 
 async def run_verification_cycle(
@@ -296,7 +308,9 @@ async def run_verification_cycle(
     }
 
     # 1. Stop VM if running
-    await stop_vm_cleanly(vbox, vm_name)
+    if not await stop_vm_cleanly(vbox, vm_name):
+        cycle_result["error"] = "Could not shut down before restoration"
+        return cycle_result
 
     # 2. Restore snapshot
     logger.info("Cycle %d: Restoring snapshot '%s'...", cycle_index, snapshot_name)
@@ -346,24 +360,17 @@ async def run_verification_cycle(
     if not is_pre_clean:
         logger.error("Cycle %d: Pre-clean state verification FAILED! Leftover artifacts detected", cycle_index)
 
-    # 6. Plant marker
-    planted = await plant_markers(channel, marker_file, reg_path, cycle_marker)
-    cycle_result["marker_planted"] = planted
-
-    # 7. Execute benign workload
-    workload_res = await run_benign_workload(channel, "cmd.exe", ["/c", "whoami.exe"])
-    cycle_result["workload"] = workload_res
-    cycle_result["workload_executed"] = workload_res.get("success", False)
-
     # 8. Verify telemetry source responsiveness
     diag = await channel.verify_tools()
     is_valid_diag = isinstance(diag, ToolAvailability)
     telemetry_ready = (
         is_valid_diag
-        and (diag.sysmon_log_available or diag.procmon_available or diag.tshark_available)
+        and (diag.sysmon_log_available and diag.procmon_available and diag.tshark_available)
         and not diag.required_missing
     )
-    cycle_result["telemetry_verified"] = bool(telemetry_ready)
+    cycle_result["tools_ready"] = bool(telemetry_ready)
+    # Tool presence is a prerequisite, never capture evidence.
+    cycle_result["telemetry_verified"] = False
     cycle_result["tools"] = {
         "procmon_available": diag.procmon_available,
         "tshark_available": diag.tshark_available,
@@ -375,6 +382,55 @@ async def run_verification_cycle(
         detail_msg = diag.detail if is_valid_diag else "Invalid ToolAvailability response"
         logger.warning("Cycle %d: Telemetry readiness verification failed: %s", cycle_index, detail_msg)
         cycle_result["telemetry_warning"] = f"Telemetry tools not ready: {detail_msg}"
+    elif is_pre_clean:
+        try:
+            version = await channel.get_version()
+            manifest = json.loads((_PROJECT_ROOT / "adam/sandbox/guest/agent/build_manifest.json").read_text(encoding="utf-8"))
+            if version.build_id != manifest["build_id"] or not {"sysmon.events.since", "diagnostics.tools"}.issubset(version.capabilities):
+                raise RuntimeError("Guest build or required capabilities do not match the package")
+            diagnostics = await channel.get_tool_diagnostics()
+            cycle_result["diagnostics"] = diagnostics.model_dump()
+            if diagnostics.tools.get("npcap", {}).get("service_status") != "Running":
+                raise RuntimeError("Npcap capture driver is not running")
+            evidence = DEFAULT_OUTPUT_FILE.parent / cycle_marker
+            evidence.mkdir(parents=True, exist_ok=True)
+            sample = evidence / f"{cycle_marker}.exe"
+            compiler = Path(os.environ["WINDIR"]) / "Microsoft.NET/Framework64/v4.0.30319/csc.exe"
+            await asyncio.to_thread(subprocess.run, [str(compiler), "/nologo", f"/out:{sample}", str(_PROJECT_ROOT / "scripts/verification_workload.cs")], check=True, capture_output=True)
+            if not await stop_vm_cleanly(vbox, vm_name):
+                raise RuntimeError("Could not shut down before pipeline run")
+            settings = get_settings().model_copy(deep=True)
+            settings.sandbox.snapshot_name = snapshot_name
+            settings.http_guest.tools_required = True
+            settings.http_guest.tshark_interface = "auto"
+            settings.live.enabled = True
+            session = await Runner(settings).run(str(sample.resolve()), artifacts_dir=evidence,
+                arm=Arm.CONTROL if cycle_index == 1 else Arm.TREATMENT)
+            (evidence / "session.json").write_text(session.model_dump_json(indent=2), encoding="utf-8")
+            cycle_result["session_id"] = session.session_id
+            cycle_result["session_status"] = session.status.value
+            cycle_result["source_outcomes"] = {k: v.model_dump() for k, v in session.source_outcomes.items()}
+            rows = [json.loads(line) for line in (evidence / session.session_id / "raw.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
+            correlation = {}
+            for source in ("SYSMON", "PROCMON"):
+                relevant = [row for row in rows if row["source"].upper() == source]
+                correlation[f"{source}.process"] = any(cycle_marker in json.dumps(row) for row in relevant if row["category"].upper() == "PROCESS")
+                correlation[f"{source}.file"] = any(f"run_marker_{cycle_index}.txt" in json.dumps(row) for row in relevant if row["category"].upper() == "FILE")
+                correlation[f"{source}.registry"] = any(f"cycle{cycle_index}" in json.dumps(row).lower() for row in relevant if row["category"].upper() == "REGISTRY")
+            correlation["network"] = any("192.168.19.2" in json.dumps(row) and "18080" in json.dumps(row)
+                for row in rows if row["source"].upper() in ("TSHARK", "NETWORK"))
+            cycle_result["marker_correlation"] = correlation
+            cycle_result["marker_planted"] = all(value for key, value in correlation.items() if key.endswith((".file", ".registry")))
+            cycle_result["workload_executed"] = session.status == SessionStatus.COMPLETED and session.execution_exit_code == 0
+            outcomes = session.source_outcomes
+            cycle_result["telemetry_verified"] = bool(cycle_result["workload_executed"]
+                and all(correlation.values()) and outcomes.get("sysmon") and outcomes["sysmon"].live_events_count > 0
+                and all(outcomes.get(k) and outcomes[k].verified and outcomes[k].capture_started
+                    and outcomes[k].exported and outcomes[k].parsed and not outcomes[k].errors
+                    for k in ("sysmon", "procmon", "network")))
+        except Exception as exc:
+            logger.exception("Normal pipeline verification failed")
+            cycle_result["error"] = str(exc)
 
     # 9. Stop VM cleanly
     cycle_result["vm_stopped"] = await stop_vm_cleanly(vbox, vm_name)
@@ -388,6 +444,7 @@ async def promote_candidate_to_clean(
     vm_name: str,
     candidate_name: str,
     recovery_name: str,
+    verification: dict | None = None,
 ) -> dict:
     """
     Deletes the old recovery snapshot and renames the candidate snapshot to 'clean'.
@@ -402,63 +459,84 @@ async def promote_candidate_to_clean(
         "success": False,
     }
 
-    if candidate_name == "clean":
-        logger.info("Candidate snapshot is already named 'clean' -- verifying single snapshot baseline")
-        snapshots = await vbox.list_snapshots(vm_name)
-        other_snapshots = [s for s in snapshots if s.name != "clean"]
-        if other_snapshots:
-            for s in other_snapshots:
-                logger.info("Deleting old snapshot '%s' (uuid=%s)...", s.name, s.uuid)
-                del_res = await vbox._run("snapshot", vm_name, "delete", s.uuid)
-                if not del_res.success:
-                    logger.warning("Could not delete old snapshot '%s': %s", s.name, del_res.stderr)
-            snapshots = await vbox.list_snapshots(vm_name)
-
-        promotion["recovery_deleted"] = (
-            not any(s.name == recovery_name for s in snapshots)
-            if recovery_name != candidate_name
-            else True
-        )
-        promotion["candidate_renamed"] = True
-        promotion["final_snapshot_count"] = len(snapshots)
-        promotion["final_snapshots"] = [s.name for s in snapshots]
-        promotion["success"] = any(s.name == "clean" for s in snapshots) and len(snapshots) == 1
+    if not verification or verification.get("candidate_uuid") != candidate_name or not verification.get("cycles_passed"):
+        promotion["error"] = "Successful verification bound to the candidate UUID is required"
         return promotion
 
     snapshots = await vbox.list_snapshots(vm_name)
-    logger.info("Current snapshots registered on '%s': %s", vm_name, [s.name for s in snapshots])
-
-    # Find recovery snapshot
-    rec_snap = next((s for s in snapshots if s.name == recovery_name or s.uuid == recovery_name), None)
-    if rec_snap:
-        logger.info("Deleting old recovery snapshot '%s' (uuid=%s)...", rec_snap.name, rec_snap.uuid)
-        del_res = await vbox._run("snapshot", vm_name, "delete", rec_snap.uuid)
-        promotion["recovery_deleted"] = del_res.success
-        if not del_res.success:
-            logger.warning("Could not delete recovery snapshot: %s", del_res.stderr)
-    else:
-        logger.info("Recovery snapshot '%s' not present or already removed", recovery_name)
-        promotion["recovery_deleted"] = True
-
-    # Rename candidate snapshot to 'clean'
-    logger.info("Renaming candidate snapshot '%s' to 'clean'...", candidate_name)
-    edit_res = await vbox._run("snapshot", vm_name, "edit", candidate_name, "--name", "clean")
-    promotion["candidate_renamed"] = edit_res.success
-    if not edit_res.success:
-        logger.error("Failed to rename snapshot '%s' to 'clean': %s", candidate_name, edit_res.stderr)
-        promotion["error"] = edit_res.stderr
+    candidates = [s for s in snapshots if candidate_name in (s.name, s.uuid)]
+    recoveries = [s for s in snapshots if recovery_name in (s.name, s.uuid)]
+    if len(candidates) != 1 or len(recoveries) != 1 or len(snapshots) != 2:
+        promotion["error"] = "Promotion requires exactly one candidate and one recovery"
+        return promotion
+    candidate, recovery = candidates[0], recoveries[0]
+    if candidate.uuid == recovery.uuid:
+        promotion["error"] = "Candidate and recovery must have distinct UUIDs"
+        return promotion
+    if await vbox.get_state(vm_name) != "poweroff":
+        promotion["error"] = "Promotion requires a powered-off VM"
+        return promotion
+    for snapshot_id, name in ((recovery.uuid, "recovery-" + recovery.uuid), (candidate.uuid, "clean")):
+        result = await vbox._run("snapshot", vm_name, "edit", snapshot_id, "--name", name)
+        if not result.success:
+            promotion["error"] = result.stderr
+            if snapshot_id == candidate.uuid:
+                rollback = await vbox._run("snapshot", vm_name, "edit", recovery.uuid, "--name", recovery.name)
+                promotion["recovery_name_restored"] = rollback.success
+            return promotion
+    promotion["candidate_renamed"] = True
+    renamed = await vbox.list_snapshots(vm_name)
+    if not any(s.uuid == candidate.uuid and s.name == "clean" for s in renamed):
+        promotion["error"] = "Candidate rename could not be verified; recovery preserved"
+        return promotion
+    result = await vbox._run("snapshot", vm_name, "delete", recovery.uuid)
+    promotion["recovery_deleted"] = result.success
+    if not result.success:
+        promotion["error"] = result.stderr
         return promotion
 
     # Verify final snapshots
     final_snapshots = await vbox.list_snapshots(vm_name)
     promotion["final_snapshot_count"] = len(final_snapshots)
     promotion["final_snapshots"] = [s.name for s in final_snapshots]
-    promotion["success"] = any(s.name == "clean" for s in final_snapshots) and len(final_snapshots) == 1
+    promotion["success"] = any(s.name == "clean" and s.uuid == candidate.uuid for s in final_snapshots) and len(final_snapshots) == 1
 
     return promotion
 
 
-async def run_harness(args: argparse.Namespace) -> int:
+async def verify_final_baseline(vbox, channel, vm_name, candidate_uuid) -> dict:
+    result = {"success": False, "snapshot_uuid": candidate_uuid}
+    try:
+        if not await stop_vm_cleanly(vbox, vm_name):
+            raise RuntimeError("VM did not shut down cleanly")
+        restored = await vbox.restore_snapshot(vm_name, candidate_uuid)
+        if not restored.success:
+            raise RuntimeError(restored.stderr)
+        started = await vbox.start(vm_name, headless=True)
+        if not started.success or not await wait_for_guest_ready(channel):
+            raise RuntimeError("Final baseline did not boot with a healthy agent")
+        expected = json.loads((_PROJECT_ROOT / "adam/sandbox/guest/agent/build_manifest.json").read_text(encoding="utf-8"))["build_id"]
+        if (await channel.get_version()).build_id != expected:
+            raise RuntimeError("Final baseline runs a different agent build")
+        for cycle in (1, 2):
+            markers = await check_markers(channel, f"C:\\ADAM\\run_marker_{cycle}.txt", f"HKLM\\Software\\ADAM\\Cycle{cycle}")
+            if "error" in markers or markers["file_present"] or markers["reg_present"]:
+                raise RuntimeError("Final baseline contains verification markers or could not be checked")
+        result["success"] = True
+    except Exception as exc:
+        logger.exception("Final baseline verification failed")
+        result["error"] = str(exc)
+    finally:
+        stopped = await stop_vm_cleanly(vbox, vm_name)
+        result["vm_stopped"] = stopped
+        result["success"] = result["success"] and stopped
+        if stopped:
+            pristine = await vbox.restore_snapshot(vm_name, candidate_uuid)
+            result["success"] = result["success"] and pristine.success
+    return result
+
+
+async def _run_harness(args: argparse.Namespace) -> int:
     vdi_path = Path(args.vdi_path)
     output_path = Path(args.output_file)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -479,6 +557,7 @@ async def run_harness(args: argparse.Namespace) -> int:
             sysmon_log=settings.http_guest.sysmon_log,
             tshark_interface=settings.http_guest.tshark_interface,
             auth_token=settings.http_guest.auth_token,
+            tools_required=True,
         )
 
     logger.info("Starting candidate snapshot verification harness for VM '%s'", vm_name)
@@ -487,17 +566,22 @@ async def run_harness(args: argparse.Namespace) -> int:
     vdi_baseline = check_orphan_vdi(vdi_path)
     logger.info("Unregistered VDI check: %s", vdi_baseline)
     baseline_stat = vdi_path.stat() if vdi_path.exists() else None
+    if not vdi_baseline.get("exists"):
+        output_path.write_text(json.dumps({"overall_status": "FAILED", "error": "Required orphan disk baseline is unavailable"}, indent=2))
+        return 1
 
     # Check available snapshots
     snapshots = await vbox.list_snapshots(vm_name)
     snap_names = [s.name for s in snapshots]
     logger.info("Available snapshots: %s", snap_names)
 
-    # If candidate doesn't exist, but clean exists and candidate was default, handle gracefully
-    target_candidate = candidate_snap
-    if candidate_snap not in snap_names and "clean" in snap_names and candidate_snap == "candidate":
-        logger.info("Candidate snapshot 'candidate' not found; evaluating existing baseline 'clean'")
-        target_candidate = "clean"
+    candidates = [s for s in snapshots if candidate_snap in (s.name, s.uuid)]
+    recoveries = [s for s in snapshots if recovery_snap in (s.name, s.uuid)]
+    if len(candidates) != 1 or len(recoveries) != 1 or candidates[0].uuid == recoveries[0].uuid:
+        output_path.write_text(json.dumps({"overall_status": "FAILED", "error": "Distinct existing candidate and recovery UUIDs required"}, indent=2))
+        return 1
+    target_candidate = candidates[0].uuid
+    recovery_snap = recoveries[0].uuid
 
     # 2. Execute 2 consecutive cycles
     channel1 = _create_channel()
@@ -522,26 +606,39 @@ async def run_harness(args: argparse.Namespace) -> int:
     finally:
         await channel2.aclose()
 
-    cycles_passed = (
-        cycle1.get("restore_success", False)
-        and cycle1.get("pre_clean_verified", False)
-        and cycle1.get("marker_planted", False)
-        and cycle1.get("workload_executed", False)
-        and cycle2.get("restore_success", False)
-        and cycle2.get("state_reset_verified", False)
-        and cycle2.get("marker_planted", False)
-        and cycle2.get("workload_executed", False)
-    )
+    required_checks = ("restore_success", "guest_ready", "pre_clean_verified", "marker_planted",
+                       "workload_executed", "telemetry_verified", "vm_stopped")
+    cycles_passed = all(c.get(key) is True for c in (cycle1, cycle2) for key in required_checks)
+    cycles_passed = cycles_passed and cycle2.get("state_reset_verified") is True
+    pre_promotion_health = None
+    if cycles_passed:
+        channel = _create_channel()
+        try:
+            pre_promotion_health = await verify_final_baseline(vbox, channel, vm_name, target_candidate)
+            cycles_passed = pre_promotion_health["success"]
+        finally:
+            await channel.aclose()
 
     # 3. Promote candidate to clean if requested and cycles passed
     promotion_result: dict | None = None
-    if cycles_passed and args.promote:
+    vdi_pre_promotion = check_orphan_vdi(vdi_path, baseline_stat)
+    disk_safe = vdi_baseline.get("exists") and vdi_pre_promotion.get("untouched") and vdi_pre_promotion.get("sha256") == vdi_baseline.get("sha256")
+    if cycles_passed and disk_safe and args.promote:
         promotion_result = await promote_candidate_to_clean(
-            vbox, vm_name, target_candidate, recovery_snap
+            vbox, vm_name, target_candidate, recovery_snap,
+            verification={"candidate_uuid": target_candidate, "cycles_passed": cycles_passed},
         )
+        if promotion_result.get("success"):
+            channel = _create_channel()
+            try:
+                promotion_result["final_health"] = await verify_final_baseline(vbox, channel, vm_name, target_candidate)
+                promotion_result["success"] = promotion_result["final_health"]["success"]
+            finally:
+                await channel.aclose()
 
     # 4. Final VDI untouched verification
     vdi_final = check_orphan_vdi(vdi_path, baseline_stat)
+    vdi_final["untouched"] = bool(vdi_final.get("exists") and vdi_final.get("untouched") and vdi_final.get("sha256") == vdi_baseline.get("sha256"))
     logger.info("Final unregistered VDI check: %s", vdi_final)
 
     # 5. Build final machine-readable result
@@ -556,6 +653,7 @@ async def run_harness(args: argparse.Namespace) -> int:
         "cycles": [cycle1, cycle2],
         "cycles_passed": cycles_passed,
         "promotion": promotion_result,
+        "pre_promotion_health": pre_promotion_health,
         "orphan_disk_untouched": vdi_final.get("untouched", True),
         "orphan_disk_path": str(vdi_path),
         "orphan_disk_bytes": vdi_final.get("size_bytes", 0),
@@ -566,6 +664,29 @@ async def run_harness(args: argparse.Namespace) -> int:
     logger.info("Saved verification results to: %s", output_path)
 
     return 0 if final_result["overall_status"] == "PASSED" else 1
+
+
+class VerificationHTTPHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"ADAM verification response")
+
+    def log_message(self, *args):
+        logger.info("Controlled guest request: %s", self.path)
+
+
+async def run_harness(args: argparse.Namespace) -> int:
+    # The workload intentionally targets only this host-only address.
+    server = ThreadingHTTPServer(("192.168.19.2", 18080), VerificationHTTPHandler)
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        return await _run_harness(args)
+    finally:
+        await asyncio.to_thread(server.shutdown)
+        server.server_close()
+        thread.join(timeout=5)
 
 
 def main() -> None:
@@ -583,8 +704,8 @@ def main() -> None:
     parser.add_argument(
         "--promote",
         action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Whether to promote candidate snapshot to clean on success (default: True)",
+        default=False,
+        help="Explicitly promote after successful verification (default: False)",
     )
 
     args = parser.parse_args()

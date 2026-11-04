@@ -62,11 +62,12 @@ Error-handling design (read this before adding a method):
 from __future__ import annotations
 
 import asyncio
-from pathlib import Path
+import logging
 import re
 import shutil
 import time
 import uuid
+from pathlib import Path
 from typing import Literal
 
 from adam.common.errors import VMOperationError
@@ -169,7 +170,7 @@ class VirtualBoxClient:
 
         try:
             stdout_bytes, stderr_bytes = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             proc.kill()
             await proc.wait()
             duration_ms = (time.monotonic() - start) * 1000
@@ -295,10 +296,10 @@ class VirtualBoxClient:
                 pairs.setdefault(key, [None, None])[1] = match.group(2)
 
         snapshots: list[SnapshotInfo] = []
-        for name, uuid in pairs.values():
-            if name is None or uuid is None:
+        for name, snapshot_uuid in pairs.values():
+            if name is None or snapshot_uuid is None:
                 continue
-            snapshots.append(SnapshotInfo(name=name, uuid=uuid, is_current=(uuid == current_uuid)))
+            snapshots.append(SnapshotInfo(name=name, uuid=snapshot_uuid, is_current=(snapshot_uuid == current_uuid)))
         return snapshots
 
     async def start(self, vm_name: str, headless: bool = True) -> VMOperationResult:
@@ -548,7 +549,7 @@ class VirtualBoxClient:
                         stderr="",
                     )
             except Exception:
-                pass
+                logging.getLogger(__name__).exception("Operation failed; applying documented fallback")
 
             # 2. Secondary probe: guestcontrol execution if interactive session is active
             probe = await self.run_in_guest(
@@ -717,7 +718,7 @@ class VirtualBoxClient:
         args = ["clonevm", base_vm_or_snapshot, "--name", target_name, "--register", "--mode", mode]
         if snapshot_name:
             args.extend(["--snapshot", snapshot_name])
-        result = self._require_success(await self._run(*args))
+        self._require_success(await self._run(*args))
         return target_name
 
     async def snapshot(self, vm_name: str, name: str, description: str = "") -> SnapshotInfo:

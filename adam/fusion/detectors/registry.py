@@ -1,16 +1,16 @@
 from __future__ import annotations
 
 from .base import BaseDetector
-from .recon import ReconDetector
-from .persistence import PersistenceDetector
-from .credential_access import CredentialAccessDetector
-from .defense_evasion import DefenseEvasionDetector
-from .privilege_escalation import PrivilegeEscalationDetector
-from .lateral_movement import LateralMovementDetector
 from .collection import CollectionDetector
 from .command_and_control import CommandAndControlDetector
+from .credential_access import CredentialAccessDetector
+from .defense_evasion import DefenseEvasionDetector
 from .exfiltration import ExfiltrationDetector
 from .impact import ImpactDetector
+from .lateral_movement import LateralMovementDetector
+from .persistence import PersistenceDetector
+from .privilege_escalation import PrivilegeEscalationDetector
+from .recon import ReconDetector
 
 
 class DetectorRegistry:

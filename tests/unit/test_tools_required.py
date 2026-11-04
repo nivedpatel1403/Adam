@@ -141,7 +141,8 @@ async def test_tools_required_false_missing_procmon_continues(tmp_path: Path) ->
         tmp_path,
         ToolAvailability(False, True, True, {"procmon": "missing"}),
     )
-    assert session.status is SessionStatus.COMPLETED
+    assert session.status is SessionStatus.FAILED
+    assert session.source_outcomes["procmon"].errors
     assert controller.arm_called is True
     assert controller.detonate_called is True
     assert guest.start_captures_called is True
@@ -153,7 +154,9 @@ async def test_tools_required_all_present_continues(tmp_path: Path) -> None:
         tmp_path,
         ToolAvailability(True, True, True, {}),
     )
-    assert session.status is SessionStatus.COMPLETED
+    # Presence alone cannot make a run with no exported artifacts successful.
+    assert session.status is SessionStatus.FAILED
+    assert any(f.description == "No exported artifact" for f in session.failures)
     assert controller.arm_called is True
     assert controller.detonate_called is True
     assert guest.start_captures_called is True

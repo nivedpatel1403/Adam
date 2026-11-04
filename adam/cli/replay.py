@@ -1,16 +1,17 @@
-import typer
 import asyncio
 import json
+import logging
+from datetime import UTC, datetime
 from pathlib import Path
-from datetime import datetime, timezone
-from rich.console import Console
-import hashlib
 
+import typer
+from rich.console import Console
+
+from adam.api.deps import deps, init_dependencies, shutdown_dependencies
+from adam.contracts.enums import Arm, NetworkMode, SessionStatus
 from adam.contracts.envelope import Envelope
 from adam.contracts.raw_event import RawEvent
 from adam.contracts.session import AnalysisSession, SampleRef, SessionConfig, SessionMetrics
-from adam.contracts.enums import Arm, SessionStatus, NetworkMode
-from adam.api.deps import init_dependencies, shutdown_dependencies, deps
 
 console = Console()
 
@@ -49,7 +50,7 @@ def replay_main(
                 sample=sample,
                 config=config,
                 status=SessionStatus.RUNNING,
-                started_at=datetime.now(timezone.utc),
+                started_at=datetime.now(UTC),
                 metrics=SessionMetrics()
             )
             await deps.session_repo.create(metadata)
@@ -58,10 +59,11 @@ def replay_main(
             events_to_replay = []
             
             if log_path == "synthetic":
-                from adam.fusion.log_generate import generate_attack_chain, generate_benign_events
                 import random
+
+                from adam.fusion.log_generate import generate_attack_chain, generate_benign_events
                 random.seed(42)
-                start_time = datetime(2026, 8, 5, 9, 0, 0, tzinfo=timezone.utc)
+                start_time = datetime(2026, 8, 5, 9, 0, 0, tzinfo=UTC)
                 attack_events = generate_attack_chain("WKSTN-666", "j.smith", start_time)
                 benign_events = generate_benign_events(50, start_time)
                 all_events = benign_events + attack_events
@@ -69,9 +71,10 @@ def replay_main(
                 
                 for ev in all_events:
                     try:
-                        ts = datetime.fromisoformat(ev["timestamp"].replace("Z", "+00:00"))
+                        ts = datetime.fromisoformat(ev["timestamp"])
                     except Exception:
-                        ts = datetime.now(timezone.utc)
+                        logging.getLogger(__name__).exception("Operation failed; applying documented fallback")
+                        ts = datetime.now(UTC)
                     raw_event = RawEvent(
                         event_id=f"raw_{uuid.uuid4().hex[:8]}",
                         session_id=session_id,
@@ -79,7 +82,7 @@ def replay_main(
                         source_event_id=1,
                         category="PROCESS",
                         occurred_at=ts,
-                        observed_at=datetime.now(timezone.utc),
+                        observed_at=datetime.now(UTC),
                         attributes=ev
                     )
                     env = Envelope[RawEvent](
@@ -88,7 +91,7 @@ def replay_main(
                         message_type="RawEvent",
                         session_id=session_id,
                         correlation_id=f"corr_{uuid.uuid4().hex[:8]}",
-                        emitted_at=datetime.now(timezone.utc),
+                        emitted_at=datetime.now(UTC),
                         emitter="sim",
                         payload=raw_event
                     )
@@ -98,32 +101,31 @@ def replay_main(
                 if not p.is_file():
                     console.print(f"[red]error:[/red] file not found: {log_path}")
                     raise typer.Exit(code=2)
-                with open(p, "r", encoding="utf-8") as f:
-                    for line in f:
-                        line = line.strip()
-                        if not line:
-                            continue
-                        data = json.loads(line)
-                        if data.get("message_type") == "RawEvent":
-                            env = Envelope[RawEvent].model_validate(data)
-                            # Override session_id so it gets processed correctly in this run
-                            env.session_id = session_id
-                            env.payload.session_id = session_id
-                            events_to_replay.append(env)
-                        else:
-                            data['session_id'] = session_id
-                            raw_event = RawEvent.model_validate(data)
-                            env = Envelope[RawEvent](
-                                envelope_version="1.0",
-                                message_id=str(uuid.uuid4()),
-                                message_type="RawEvent",
-                                session_id=session_id,
-                                correlation_id=f"corr_{uuid.uuid4().hex[:8]}",
-                                emitted_at=datetime.now(timezone.utc),
-                                emitter="replay",
-                                payload=raw_event,
-                            )
-                            events_to_replay.append(env)
+                for line in (await asyncio.to_thread(p.read_text, encoding="utf-8")).splitlines():
+                    line = line.strip()
+                    if not line:
+                        continue
+                    data = json.loads(line)
+                    if data.get("message_type") == "RawEvent":
+                        env = Envelope[RawEvent].model_validate(data)
+                        # Override session_id so it gets processed correctly in this run
+                        env.session_id = session_id
+                        env.payload.session_id = session_id
+                        events_to_replay.append(env)
+                    else:
+                        data['session_id'] = session_id
+                        raw_event = RawEvent.model_validate(data)
+                        env = Envelope[RawEvent](
+                            envelope_version="1.0",
+                            message_id=str(uuid.uuid4()),
+                            message_type="RawEvent",
+                            session_id=session_id,
+                            correlation_id=f"corr_{uuid.uuid4().hex[:8]}",
+                            emitted_at=datetime.now(UTC),
+                            emitter="replay",
+                            payload=raw_event,
+                        )
+                        events_to_replay.append(env)
 
             console.print(f"Replaying {len(events_to_replay)} events for session {session_id}...")
             
@@ -132,7 +134,7 @@ def replay_main(
             
             # Update session status to COMPLETED
             metadata.status = SessionStatus.COMPLETED
-            metadata.ended_at = datetime.now(timezone.utc)
+            metadata.ended_at = datetime.now(UTC)
             await deps.session_repo.update(metadata)
             await deps.db_conn.commit()
 
@@ -141,7 +143,12 @@ def replay_main(
             
             # Re-open a temporary connection just to fetch final summary counts
             import aiosqlite
-            from adam.db.repositories.sqlite import SQLiteEventRepository, SQLiteDecisionRepository, SQLiteMutationRepository
+
+            from adam.db.repositories.sqlite import (
+                SQLiteDecisionRepository,
+                SQLiteEventRepository,
+                SQLiteMutationRepository,
+            )
             async with aiosqlite.connect(settings.db.path) as read_conn:
                 e_repo = SQLiteEventRepository(read_conn)
                 d_repo = SQLiteDecisionRepository(read_conn)
@@ -150,7 +157,7 @@ def replay_main(
                 mutations = await m_repo.get_by_session(session_id)
                 semantic_events = await e_repo.get_semantic_by_session(session_id)
             
-            console.print(f"[green]Replay complete.[/green]")
+            console.print("[green]Replay complete.[/green]")
             console.print(f"Semantic Events: {len(semantic_events)}")
             console.print(f"Policy Decisions: {len(decisions)}")
             console.print(f"Mutations Applied: {len(mutations)}")
@@ -162,7 +169,7 @@ def replay_main(
             try:
                 await shutdown_dependencies()
             except Exception:
-                pass
-            raise e
+                logging.getLogger(__name__).exception("Operation failed; applying documented fallback")
+            raise
 
     asyncio.run(_run())

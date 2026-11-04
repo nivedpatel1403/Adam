@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import PureWindowsPath
+from typing import ClassVar
 
 from .models import RawEvent
 
@@ -11,7 +12,7 @@ class EventNormalizer:
     into a canonical representation.
     """
 
-    EVENT_MAP = {
+    EVENT_MAP: ClassVar[dict[str, str]] = {
         "ProcessCreate": "PROCESS_CREATE",
         "Process Create": "PROCESS_CREATE",
         "CreateProcess": "PROCESS_CREATE",

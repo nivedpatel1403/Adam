@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import ClassVar
+
 from ..models import RawEvent, SemanticEvent
 from .base import BaseDetector
 
@@ -14,7 +16,7 @@ class DefenseEvasionDetector(BaseDetector):
 
     TECHNIQUE_ID = "T1562"
 
-    STRONG_INDICATORS = [
+    STRONG_INDICATORS: ClassVar[dict[str, str]] = [
         "set-mppreference",
         "disableantispyware",
         "disablebehaviormonitoring",
@@ -22,7 +24,7 @@ class DefenseEvasionDetector(BaseDetector):
         "windefend",
     ]
 
-    MEDIUM_INDICATORS = [
+    MEDIUM_INDICATORS: ClassVar[dict[str, str]] = [
         "sc stop windefend",
         "net stop windefend",
         "stop-service windefend",
@@ -31,7 +33,7 @@ class DefenseEvasionDetector(BaseDetector):
         "disable realtime monitoring",
     ]
 
-    WEAK_INDICATORS = [
+    WEAK_INDICATORS: ClassVar[dict[str, str]] = [
         "bypass",
         "amsi",
         "etw",

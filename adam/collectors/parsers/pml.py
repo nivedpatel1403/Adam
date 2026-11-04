@@ -43,7 +43,7 @@ from __future__ import annotations
 import csv
 import io
 import re
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from adam.contracts.enums import Category, Source
 from adam.contracts.raw_event import ProcessInfo, RawEvent
@@ -70,7 +70,7 @@ _MODULE_OPERATIONS = {"Load Image"}
 def _categorize(operation: str) -> Category:
     if operation.startswith("Reg"):
         return Category.REGISTRY
-    if operation.startswith("TCP") or operation.startswith("UDP"):
+    if operation.startswith(("TCP", "UDP")):
         return Category.NETWORK
     if operation in _PROCESS_OPERATIONS:
         return Category.PROCESS
@@ -127,7 +127,7 @@ def _parse_datetime(raw: str) -> datetime:
             minute=int(match.group("minute")),
             second=int(match.group("second")),
             microsecond=int(frac),
-            tzinfo=timezone.utc,
+            tzinfo=UTC,
         )
     except ValueError as exc:
         raise ProcmonParseError(f"invalid ProcMon 'Date & Time' value: {raw!r} ({exc})") from exc
@@ -178,7 +178,7 @@ def parse_procmon_csv_row(
         source_event_id=sequence,
         category=category,
         occurred_at=occurred_at,
-        observed_at=datetime.now(timezone.utc),
+        observed_at=datetime.now(UTC),
         process=process,
         attributes={
             "operation": operation,

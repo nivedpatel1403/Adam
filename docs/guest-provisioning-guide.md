@@ -1,63 +1,35 @@
-# ADAM Guest VM Provisioning Guide
+# ADAM guest provisioning and verification
 
-This guide walks through provisioning telemetry tools (**Process Monitor**, **TShark / Wireshark**, and **Sysmon**) inside the VirtualBox guest VM to resolve **Limitation #3** from `known_limitations.md`.
+Keep the Windows guest on its host-only network. Stage installers on the host, validate publisher signatures, record SHA-256 hashes, and transfer the verified files with the agent package.
 
----
+Default paths:
 
-## 1. Overview of Guest Requirements
-
-ADAM collects telemetry from three primary sources during malware analysis sessions:
-1. **Sysmon**: Process creation, network connections, file creation, registry modifications. (Channel: `Microsoft-Windows-Sysmon/Operational`).
-2. **Process Monitor (`Procmon64.exe`)**: Detailed file and registry operation tracing (`.pml` -> `.csv`).
-3. **TShark (`tshark.exe`)**: Packet capture on the guest network interface (`.pcapng` -> `.json`).
-
-The committed default paths in `config/default.toml` are:
 - `procmon_path = "C:\\ADAM\\Tools\\Procmon\\Procmon64.exe"`
 - `tshark_path = "C:\\Program Files\\Wireshark\\tshark.exe"`
-- `sysmon_log = "Microsoft-Windows-Sysmon/Operational"`
+- Sysmon channel: `Microsoft-Windows-Sysmon/Operational`
 
----
+The Procmon executable is `C:\ADAM\Tools\Procmon\Procmon64.exe`.
 
-## 2. Automated Provisioning Procedure
+## Complete the staged repair
 
-### Step 1: Boot the VirtualBox Guest VM
-Start the VM from the analysis host:
-```bash
-VBoxManage startvm "Windows" --type gui
-```
-Log in using the configured guest credentials (`guest_username` / `guest_password`).
+The November 4 repair bundle is staged at `C:\ADAM\repair`. Start the VM in its current state, without restoring the old recovery snapshot. Log in and open an administrator PowerShell. Run:
 
-### Step 2: Run the Provisioning Script
-Inside the guest VM, open an **Elevated PowerShell Prompt (Run as Administrator)**:
 ```powershell
-# Copy scripts/provision_guest_tools.ps1 into the guest (or download/paste it)
-Set-ExecutionPolicy Bypass -Scope Process -Force
-.\provision_guest_tools.ps1
+& 'C:\ADAM\repair\finish_guest_repair.ps1'
 ```
 
-The script will:
-- Download and unpack Sysinternals Process Monitor to `C:\ADAM\Tools\Procmon\Procmon64.exe`.
-- Pre-accept the Sysinternals EULA in the registry (`EulaAccepted=1`).
-- Download and install Npcap and Wireshark silently/automatically, placing `tshark.exe` at `C:\Program Files\Wireshark\tshark.exe` and enabling packet capture on the host-only adapter.
-- Verify the Sysmon service status.
+Complete the Npcap wizard when it opens. The script verifies installer hashes against the host manifest, installs missing tools, verifies the driver and interfaces, deploys the agent as SYSTEM, verifies deployed file hashes, and checks health. It preserves existing authentication settings and performs no snapshot operations.
 
-### Step 3: Take a Clean Golden Snapshot
-Shut down the VM cleanly:
-```powershell
-Stop-Computer -Force
-```
-On the host, take a new snapshot:
-```bash
-VBoxManage snapshot "Windows" take "disk-resized-36gb-c-drive"
-```
+Standard Npcap requires its graphical installer. Silent installation requires an OEM package and an explicit `-NpcapOem` switch. See the [Npcap installer documentation](https://npcap.com/guide/npcap-users-guide.html).
 
----
+`provision_guest_tools.ps1` accepts host-staged installer paths and a signature manifest. It performs no Internet downloads, package-manager fallback, or blind key presses.
 
-## 3. Graceful Degradation in Code
+## Candidate acceptance
 
-If you cannot immediately update the guest snapshot, ADAM handles missing tools gracefully:
+After deployment succeeds, the host agent must shut down normally and create a distinct powered-off candidate snapshot. Preserve the recovery snapshot until verification passes. Run `scripts/verify_candidate_snapshots.py` with explicit candidate and recovery UUIDs. Promotion is disabled by default.
 
-1. **Non-blocking verification**: `HTTPGuestChannel.verify_tools()` and `GuestAgent.verify_tools()` return a `ToolAvailability` report and log warnings instead of raising exceptions.
-2. **Skipping inactive collectors**: `start_captures()` inspects the cached `tool_availability` and skips capture requests for uninstalled tools.
-3. **Strict mode option**: Setting `tools_required = true` in `config/default.toml` under `[guest_tools]` (VBox backend) or `[http_guest]` (HTTP backend) makes the session fail **before arming the VM or executing the sample**. The orchestrator checks the report's `required_missing` tuple immediately after `verify_tools()` and before `arm()`, `start_captures()`, or `detonate()`. `tools_required = false` (the default) logs the missing tools and continues.
-4. **Checked tools**: both backends check the configured Procmon path, tshark path, and Sysmon event-log channel. A tool whose path is unconfigured is reported unavailable; in strict mode that counts as a missing required tool.
+Acceptance requires two normal pipeline runs using a benign workload, file/registry/process marker correlation in Sysmon and Procmon, controlled host-only traffic in parsed packet evidence, live Sysmon delivery, restoration checks, successful cleanup, and matching guest build/capabilities. Missing evidence fails verification.
+
+The harness checks the unregistered disk by SHA-256 and never deletes it. Explicit promotion requires distinct UUIDs and successful verification. It checks candidate health before promotion and again after consolidation, then restores the pristine powered-off baseline.
+
+The final state must contain exactly one verified `clean` snapshot and a powered-off VM. Tool presence, unit tests, parser checks, and old completion reports alone do not establish a working VM baseline. Never manually delete snapshot VDI files.

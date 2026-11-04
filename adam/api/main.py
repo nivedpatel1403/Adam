@@ -8,11 +8,12 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import random
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Annotated, Any
 
 from fastapi import BackgroundTasks, FastAPI, File, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -141,6 +142,7 @@ async def get_session_report(session_id: str, format: str = "json"):
     except ValueError as e:
         return JSONResponse(content={"error": str(e)}, status_code=404)
     except Exception as e:
+        logging.getLogger(__name__).exception("Operation failed; applying documented fallback")
         return JSONResponse(content={"error": str(e)}, status_code=500)
 
 @app.get("/api/v1/experiments/{experiment_id}/comparison")
@@ -154,6 +156,7 @@ async def get_experiment_comparison(experiment_id: str):
     except ValueError as e:
         return JSONResponse(content={"error": str(e)}, status_code=404)
     except Exception as e:
+        logging.getLogger(__name__).exception("Operation failed; applying documented fallback")
         return JSONResponse(content={"error": str(e)}, status_code=500)
 
 async def run_deterministic_simulation(session_id: str, seed: int):
@@ -164,21 +167,22 @@ async def run_deterministic_simulation(session_id: str, seed: int):
     
     # 1. Generate events deterministically
     random.seed(seed)
-    start_time = datetime(2026, 8, 5, 9, 0, 0, tzinfo=timezone.utc)
+    start_time = datetime(2026, 8, 5, 9, 0, 0, tzinfo=UTC)
     attack_events = []
     attack_events.extend(generate_attack_chain("WKSTN-666", "j.smith", start_time))
     benign_events = generate_benign_events(200, start_time)
     all_events = benign_events + attack_events
-    all_events.sort(key=lambda x: datetime.fromisoformat(x["timestamp"].replace("Z", "+00:00")))
+    all_events.sort(key=lambda x: datetime.fromisoformat(x["timestamp"]))
     
     metadata.metrics.raw_events = len(all_events)
     
     # 2. Publish as Envelope[RawEvent]
     for ev in all_events:
         try:
-            ts = datetime.fromisoformat(ev["timestamp"].replace("Z", "+00:00"))
+            ts = datetime.fromisoformat(ev["timestamp"])
         except Exception:
-            ts = datetime.now(timezone.utc)
+            logging.getLogger(__name__).exception("Operation failed; applying documented fallback")
+            ts = datetime.now(UTC)
             
         from adam.contracts.raw_event import ProcessInfo
         
@@ -199,7 +203,7 @@ async def run_deterministic_simulation(session_id: str, seed: int):
             source_event_id=1,
             category="PROCESS",
             occurred_at=ts,
-            observed_at=datetime.now(timezone.utc),
+            observed_at=datetime.now(UTC),
             process=proc,
             attributes=ev
         )
@@ -210,7 +214,7 @@ async def run_deterministic_simulation(session_id: str, seed: int):
             message_type="RawEvent",
             session_id=session_id,
             correlation_id=f"corr_{uuid.uuid4().hex[:8]}",
-            emitted_at=datetime.now(timezone.utc),
+            emitted_at=datetime.now(UTC),
             emitter="sim",
             payload=raw_event
         )
@@ -222,7 +226,7 @@ async def run_deterministic_simulation(session_id: str, seed: int):
 
     # Mark as completed
     metadata.status = SessionStatus.COMPLETED
-    metadata.ended_at = datetime.now(timezone.utc)
+    metadata.ended_at = datetime.now(UTC)
     await deps.session_repo.update(metadata)
     await deps.db_conn.commit()
     
@@ -232,7 +236,7 @@ async def run_deterministic_simulation(session_id: str, seed: int):
         message_type="SessionCompleted",
         session_id=session_id,
         correlation_id=session_id,
-        emitted_at=datetime.now(timezone.utc),
+        emitted_at=datetime.now(UTC),
         emitter="Orchestrator",
         payload={}
     ))
@@ -241,7 +245,7 @@ async def run_deterministic_simulation(session_id: str, seed: int):
 @app.post("/api/v1/sessions/simulate")
 async def simulate_session(
     background_tasks: BackgroundTasks, 
-    file: UploadFile = File(...),
+    file: Annotated[UploadFile, File()],
     deception_enabled: bool = True,
     experiment_id: str | None = None,
 ):
@@ -274,7 +278,7 @@ async def simulate_session(
         sample=sample,
         config=config,
         status=SessionStatus.RUNNING,
-        started_at=datetime.now(timezone.utc),
+        started_at=datetime.now(UTC),
         metrics=SessionMetrics()
     )
     
@@ -297,7 +301,7 @@ async def simulate_session(
     return {"session_id": session_id, "status": "RUNNING"}
 
 @app.post("/api/v1/experiments/run")
-async def run_experiment(background_tasks: BackgroundTasks, file: UploadFile = File(...)):
+async def run_experiment(background_tasks: BackgroundTasks, file: Annotated[UploadFile, File()]):
     # Read file once
     content = await file.read()
     import uuid

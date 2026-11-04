@@ -42,7 +42,7 @@ import logging
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from adam.common.bus import EventBus, Subscription
@@ -121,10 +121,10 @@ def _caused_by_mutation(
     if not entries:
         return None
     if at.tzinfo is None:
-        at = at.replace(tzinfo=timezone.utc)
+        at = at.replace(tzinfo=UTC)
     for mutation_id, applied_at, window_ms in reversed(entries):
         if applied_at.tzinfo is None:
-            applied_at = applied_at.replace(tzinfo=timezone.utc)
+            applied_at = applied_at.replace(tzinfo=UTC)
         if applied_at <= at <= applied_at + timedelta(milliseconds=window_ms):
             return mutation_id
     return None
@@ -172,7 +172,8 @@ def wire_engines(
         try:
             ts = env.payload.occurred_at
         except Exception:
-            ts = datetime.now(timezone.utc)
+            logging.getLogger(__name__).exception("Operation failed; applying documented fallback")
+            ts = datetime.now(UTC)
 
         fusion_ev = FusionRawEvent(
             timestamp=ts,
@@ -204,7 +205,7 @@ def wire_engines(
 
             dts = detection.timestamp
             if dts.tzinfo is None:
-                dts = dts.replace(tzinfo=timezone.utc)
+                dts = dts.replace(tzinfo=UTC)
 
             target_object = next(
                 (
@@ -236,7 +237,7 @@ def wire_engines(
                 )
 
             caused_by = _caused_by_mutation(
-                handles, env.session_id, datetime.now(timezone.utc)
+                handles, env.session_id, datetime.now(UTC)
             )
             if caused_by is not None:
                 handles.semantic_events_post_mutation += 1
@@ -265,7 +266,7 @@ def wire_engines(
                 message_type="SemanticEvent",
                 session_id=env.session_id,
                 correlation_id=env.correlation_id,
-                emitted_at=datetime.now(timezone.utc),
+                emitted_at=datetime.now(UTC),
                 emitter="LiveFusionBridge",
                 payload=se,
             )
@@ -286,7 +287,7 @@ def wire_engines(
                 message_type="PolicyDecision",
                 session_id=session_id,
                 correlation_id=env.correlation_id,
-                emitted_at=datetime.now(timezone.utc),
+                emitted_at=datetime.now(UTC),
                 emitter="PolicyEngine",
                 payload=decision,
             )
@@ -347,7 +348,7 @@ def wire_engines(
                     message_type="MutationResult",
                     session_id=env.session_id,
                     correlation_id=env.correlation_id,
-                    emitted_at=datetime.now(timezone.utc),
+                    emitted_at=datetime.now(UTC),
                     emitter="DeceptionEngine",
                     payload=mutation,
                 )

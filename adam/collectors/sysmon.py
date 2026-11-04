@@ -115,6 +115,7 @@ class SysmonCollector(BaseCollector):
             try:
                 records = list(self._read_current_records())
             except OSError as exc:
+                self.errors.append(str(exc))
                 logger.warning("source=%s cannot read %s: %s", self.source_name, self._evtx_path, exc)
                 await asyncio.sleep(self._poll_interval)
                 continue
@@ -132,6 +133,7 @@ class SysmonCollector(BaseCollector):
                         xml_text, session_id=self._session_id, raw_ref=self._evtx_path
                     )
                 except SysmonParseError as exc:
+                    self.errors.append(str(exc))
                     logger.warning("source=%s skipping malformed record: %s", self.source_name, exc)
 
                 if event is not None:
@@ -151,4 +153,5 @@ class SysmonCollector(BaseCollector):
                     highest_seen = record_id
 
             self._last_record_id = highest_seen
+            self.read_complete.set()
             await asyncio.sleep(self._poll_interval)

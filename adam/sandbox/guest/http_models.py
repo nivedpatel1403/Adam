@@ -90,6 +90,12 @@ class HealthData(BaseModel):
 class VersionData(BaseModel):
     agent_version: str
     api_version: str
+    build_id: str | None = None
+    capabilities: list[str] = Field(default_factory=list)
+
+
+class ToolsDiagnosticsData(BaseModel):
+    tools: dict[str, dict[str, Any]]
 
 
 # --------------------------------------------------------------------- #

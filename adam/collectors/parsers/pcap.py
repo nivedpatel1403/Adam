@@ -36,7 +36,7 @@ that every field observed in one example capture is universally present.
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from adam.contracts.enums import Category, Source
@@ -104,7 +104,7 @@ def parse_tshark_ek_line(
         raise PcapParseError(f"non-integer frame.number: {number_raw!r}") from exc
 
     try:
-        occurred_at = datetime.fromtimestamp(float(epoch_raw), tz=timezone.utc)
+        occurred_at = datetime.fromtimestamp(float(epoch_raw), tz=UTC)
     except ValueError as exc:
         raise PcapParseError(f"non-numeric frame.time_epoch: {epoch_raw!r}") from exc
 
@@ -159,7 +159,7 @@ def parse_tshark_ek_line(
         source_event_id=frame_number,
         category=Category.NETWORK,
         occurred_at=occurred_at,
-        observed_at=datetime.now(timezone.utc),
+        observed_at=datetime.now(UTC),
         process=None,  # no process attribution at this layer -- see module docstring
         attributes=attributes,
         raw_ref=raw_ref,

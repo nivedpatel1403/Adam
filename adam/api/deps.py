@@ -8,15 +8,21 @@ import aiosqlite
 
 from adam.common.bus import EventBus
 from adam.common.config import get_settings
-from adam.db.repositories.sqlite import SQLiteSessionRepository, SQLiteEventRepository, SQLiteDecisionRepository, SQLiteMutationRepository
+from adam.db.repositories.sqlite import (
+    SQLiteDecisionRepository,
+    SQLiteEventRepository,
+    SQLiteMutationRepository,
+    SQLiteSessionRepository,
+)
 from adam.db.writer import DBWriter
-from adam.reporting.generator import ReportGenerator
 from adam.deception.engine import DeceptionEngine
 from adam.fusion.engine import EventFusionEngine
 from adam.pipeline.wiring import EngineHandles, wire_engines
 from adam.policy.context import SessionContext
 from adam.policy.engine import PolicyEngine
+from adam.reporting.generator import ReportGenerator
 from adam.sandbox.guest.channel import InMemoryGuestChannel
+
 
 class Dependencies:
     def __init__(self):

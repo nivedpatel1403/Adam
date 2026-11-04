@@ -565,11 +565,11 @@ async def test_report_generator_structured_outcomes_and_failures() -> None:
     assert "source_outcomes" in data
     sources = data["source_outcomes"]
     assert sources["Sysmon"]["events_count"] == 2
-    assert sources["Sysmon"]["status"] == "CAPTURED"
+    assert sources["Sysmon"]["status"] == "UNVERIFIED"
     assert sources["Procmon"]["events_count"] == 1
-    assert sources["Procmon"]["status"] == "CAPTURED"
+    assert sources["Procmon"]["status"] == "UNVERIFIED"
     assert sources["Tshark"]["events_count"] == 0
-    assert sources["Tshark"]["status"] == "NO_DATA"
+    assert sources["Tshark"]["status"] == "UNVERIFIED"
 
     # Validate structured failures list
     assert "failures" in data

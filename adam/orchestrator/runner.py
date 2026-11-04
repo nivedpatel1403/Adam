@@ -50,7 +50,7 @@ from __future__ import annotations
 import hashlib
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import aiosqlite
@@ -364,13 +364,14 @@ class Runner:
                 network_mode=NetworkMode.HOST_ONLY,
             ),
             status=SessionStatus.RUNNING,
-            started_at=datetime.now(timezone.utc),
+            started_at=datetime.now(UTC),
             metrics=SessionMetrics(),
         )
 
         db_conn = None
         db_writer = None
         session_repo = None
+        persistence_error = None
         try:
             db_conn = await aiosqlite.connect(settings.db.path)
             await db_conn.execute("PRAGMA journal_mode=WAL;")
@@ -388,7 +389,8 @@ class Runner:
 
             await session_repo.create(metadata)
             await db_conn.commit()
-        except Exception:
+        except Exception as exc:
+            persistence_error = f"Database initialization failed: {exc}"
             logger.exception("session=%s failed to initialize DB persistence -- continuing with live run", session_id)
 
         orchestrator = SessionOrchestrator(
@@ -398,7 +400,7 @@ class Runner:
         )
 
         session: AnalysisSession | None = None
-        teardown_errors: list[str] = []
+        teardown_errors: list[str] = [persistence_error] if persistence_error else []
         try:
             if runtime.interceptor is not None:
                 if experiment.deception_enabled:
@@ -450,6 +452,8 @@ class Runner:
                 try:
                     await db_writer.flush()
                     await db_writer.stop()
+                    if db_writer.dropped_raw_events:
+                        teardown_errors.append(f"Database writer dropped {db_writer.dropped_raw_events} raw events")
                 except Exception as exc:
                     teardown_errors.append(f"DBWriter stop failed: {exc}")
                     logger.exception("session=%s error stopping DBWriter", session_id)
@@ -474,13 +478,20 @@ class Runner:
                             config=metadata.config,
                             status=final_status,
                             started_at=session.started_at if session is not None else metadata.started_at,
-                            ended_at=session.ended_at if session is not None else datetime.now(timezone.utc),
+                            ended_at=session.ended_at if session is not None else datetime.now(UTC),
                             metrics=session.metrics if session is not None else SessionMetrics(),
                             error=final_error,
+                            source_outcomes=session.source_outcomes if session is not None else {},
+                            failures=session.failures if session is not None else [],
+                            execution_pid=session.execution_pid if session is not None else None,
+                            execution_exit_code=session.execution_exit_code if session is not None else None,
                         )
                         await session_repo.update(final_session)
                         await db_conn.commit()
-                except Exception:
+                except Exception as exc:
+                    if session is not None:
+                        session.status = SessionStatus.PARTIAL
+                        session.error = f"{session.error or ''}; Final session database update failed: {exc}"
                     logger.exception("session=%s error updating final session status in DB", session_id)
                 finally:
                     # Always release the aiosqlite worker thread, even if the
@@ -504,4 +515,8 @@ class Runner:
             self._engine_handles.mutations_applied,
         )
 
+        if session is not None:
+            directory = Path(artifacts_dir) / session.session_id
+            directory.mkdir(parents=True, exist_ok=True)
+            (directory / "session.json").write_text(session.model_dump_json(indent=2), encoding="utf-8")
         return session

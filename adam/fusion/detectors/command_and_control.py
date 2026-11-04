@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import ClassVar
+
 from ..models import RawEvent, SemanticEvent
 from .base import BaseDetector
 
@@ -14,7 +16,7 @@ class CommandAndControlDetector(BaseDetector):
 
     TECHNIQUE_ID = "T1071"
 
-    STRONG_INDICATORS = [
+    STRONG_INDICATORS: ClassVar[dict[str, str]] = [
         "curl http",
         "wget http",
         "powershell iwr",
@@ -29,7 +31,7 @@ class CommandAndControlDetector(BaseDetector):
         "c2_beacon_test",
     ]
 
-    MEDIUM_INDICATORS = [
+    MEDIUM_INDICATORS: ClassVar[dict[str, str]] = [
         "http://",
         "https://",
         "ftp://",
@@ -40,7 +42,7 @@ class CommandAndControlDetector(BaseDetector):
         "c2.baddomain.org",
     ]
 
-    WEAK_INDICATORS = [
+    WEAK_INDICATORS: ClassVar[dict[str, str]] = [
         "socket",
         "connect",
         "downloadstring",

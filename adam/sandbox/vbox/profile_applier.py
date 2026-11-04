@@ -7,11 +7,11 @@ pre-session decoy persona lures (using adam/deception/catalogue.py primitives).
 
 from __future__ import annotations
 
-import os
-from pathlib import Path
+import logging
 import random
-from typing import Any
 import tomllib
+from pathlib import Path
+from typing import Any
 
 from adam.contracts.profile import VMProfile
 from adam.deception.catalogue import get_primitive_class
@@ -76,7 +76,7 @@ async def apply_profile_persona(
             await prim.apply_async("pre_session", "pre_session", "pre_session", {})
             applied.append("PLANT_DECOY_DOCUMENTS")
         except Exception:
-            pass
+            logging.getLogger(__name__).exception("Operation failed; applying documented fallback")
 
     if persona.fake_browser_history:
         try:
@@ -85,7 +85,7 @@ async def apply_profile_persona(
             await prim.apply_async("pre_session", "pre_session", "pre_session", {})
             applied.append("INJECT_FAKE_BROWSER_CREDS")
         except Exception:
-            pass
+            logging.getLogger(__name__).exception("Operation failed; applying documented fallback")
 
     if persona.hostname_pool:
         selected_hostname = random.choice(persona.hostname_pool)

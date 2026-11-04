@@ -96,7 +96,7 @@ import asyncio
 import logging
 import uuid
 from collections.abc import Sequence
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -114,8 +114,10 @@ from adam.contracts.session import (
     AnalysisSession,
     SampleRef,
     SessionConfig,
+    SessionFailure,
     SessionLifecycle,
     SessionMetrics,
+    SourceOutcome,
 )
 from adam.orchestrator.experiment import resolve_experiment
 from adam.orchestrator.persistence import RawEventWriter
@@ -179,7 +181,7 @@ def raw_event_from_sysmon_item(item: SysmonRecordItem, session_id: str) -> RawEv
     ``attributes`` so Fusion detectors can see them during the run.
     """
     occurred_at = _parse_system_time(item.time_created)
-    observed_at = datetime.now(timezone.utc)
+    observed_at = datetime.now(UTC)
     category = category_for_sysmon_event(item.event_id)
     data = dict(item.data or {})
 
@@ -224,7 +226,7 @@ def new_session_id() -> str:
     ARCHITECTURE.md section 7.1's own example style (`sess_YYYY_MM_DD_xxxx`)
     for readability in artifact directory names and logs.
     """
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     return f"sess_{now:%Y_%m_%d}_{uuid.uuid4().hex[:8]}"
 
 
@@ -266,6 +268,18 @@ class SessionOrchestrator:
         self._live_poll_enabled = live_poll_enabled
         self._session_id: str | None = None
         self._seen_event_keys: set[tuple[str, str, int, Any]] = set()
+        self._ingest_lock = asyncio.Lock()
+        self._published_event_keys = set()
+        self._sysmon_generation = 0
+        self._failures: list[SessionFailure] = []
+        self._source_outcomes: dict[str, SourceOutcome] = {}
+
+    def _record_failure(self, stage: str, exc: Exception) -> None:
+        failure = SessionFailure(stage=stage, code=type(exc).__name__, description=str(exc))
+        if failure not in self._failures:
+            self._failures.append(failure)
+            if stage in self._source_outcomes:
+                self._source_outcomes[stage].errors.append(str(exc))
 
     def _guest_target_path_for(self, sample: SampleRef) -> str:
         return self._guest_target_path_template.format(filename=sample.filename)
@@ -296,58 +310,61 @@ class SessionOrchestrator:
             self._session_id = event.session_id
 
         dedup_key = (event.session_id, channel, generation, event.source_event_id)
-        if dedup_key in self._seen_event_keys:
-            logger.debug("session=%s dropping duplicate raw event %s", event.session_id, dedup_key)
-            return False
+        async def commit() -> bool:
+            async with self._ingest_lock:
+                if dedup_key in self._published_event_keys:
+                    return False
+                if dedup_key not in self._seen_event_keys:
+                    try:
+                        await writer.write(event)
+                    except Exception as exc:
+                        self._record_failure(channel, exc)
+                        logger.exception("Raw event persistence failed")
+                        raise
+                    self._seen_event_keys.add(dedup_key)
+                    outcome = self._source_outcomes.get(channel)
+                    if outcome is not None:
+                        outcome.events_count += 1
+                envelope: Envelope[RawEvent] = Envelope(
+                    message_id=f"msg_{uuid.uuid4().hex}", message_type="RawEvent",
+                    session_id=event.session_id, correlation_id=event.event_id,
+                    emitted_at=datetime.now(UTC), emitter=f"collector.{channel}", payload=event,
+                )
+                try:
+                    await self._bus.publish(envelope)
+                except Exception as exc:
+                    self._record_failure("publish", exc)
+                    logger.exception("Durable raw event could not be published")
+                    raise
+                self._published_event_keys.add(dedup_key)
+                return True
 
-        self._seen_event_keys.add(dedup_key)
-
+        # Complete disk persistence AND publication before releasing a cancelled
+        # caller, so a worker thread cannot race the next live/exported ingest.
+        task = asyncio.create_task(commit())
         try:
-            await writer.write(event)
-        except Exception:
-            logger.exception(
-                "session=%s channel=%s failed to persist RawEvent to raw.jsonl -- event lost",
-                event.session_id,
-                channel,
-            )
-            return False
-
-        envelope: Envelope[RawEvent] = Envelope(
-            message_id=f"msg_{uuid.uuid4().hex}",
-            message_type="RawEvent",
-            session_id=event.session_id,
-            correlation_id=event.event_id,
-            emitted_at=datetime.now(timezone.utc),
-            emitter=f"collector.{channel}",
-            payload=event,
-        )
-        try:
-            await self._bus.publish(envelope)
-        except Exception:
-            logger.exception(
-                "session=%s channel=%s failed to publish RawEvent onto bus (already durable in raw.jsonl)",
-                event.session_id,
-                channel,
-            )
-
-        return True
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            await task
+            raise
 
     async def _publish_lifecycle(self, session_id: str, status: SessionStatus, detail: str) -> None:
         lifecycle = SessionLifecycle(
-            session_id=session_id, status=status, detail=detail, occurred_at=datetime.now(timezone.utc)
+            session_id=session_id, status=status, detail=detail, occurred_at=datetime.now(UTC)
         )
         envelope: Envelope[SessionLifecycle] = Envelope(
             message_id=f"msg_{uuid.uuid4().hex}",
             message_type="SessionLifecycle",
             session_id=session_id,
             correlation_id=session_id,
-            emitted_at=datetime.now(timezone.utc),
+            emitted_at=datetime.now(UTC),
             emitter="orchestrator.session",
             payload=lifecycle,
         )
         try:
             await self._bus.publish(envelope)
-        except Exception:
+        except Exception as exc:
+            self._record_failure("lifecycle", exc)
             logger.exception("failed to publish SessionLifecycle(%s) for session=%s", status.value, session_id)
 
     async def _pump(self, collector: BaseCollector, session_id: str, writer: RawEventWriter) -> None:
@@ -361,9 +378,10 @@ class SessionOrchestrator:
                     event,
                     writer,
                     channel=collector.source_name,
-                    generation=0,
+                    generation=self._sysmon_generation if collector.source_name == "sysmon" else 0,
                 )
-            except Exception:
+            except Exception as exc:
+                self._record_failure(collector.source_name, exc)
                 logger.exception(
                     "session=%s collector=%s error during ingest_raw_event",
                     session_id,
@@ -435,6 +453,7 @@ class SessionOrchestrator:
                     is_reset = getattr(res, "log_reset", False) or (last_record_id > 0 and next_id < last_record_id)
                     if is_reset:
                         log_generation += 1
+                        self._sysmon_generation = log_generation
                         logger.info(
                             "session=%s sysmon log reset detected (next_id=%d, last_id=%d), incremented log_generation to %d",
                             session_id,
@@ -457,7 +476,7 @@ class SessionOrchestrator:
                             )
                             continue
 
-                        wall_clock_now = datetime.now(timezone.utc)
+                        wall_clock_now = datetime.now(UTC)
                         gap = (wall_clock_now - raw_event.occurred_at).total_seconds()
                         logger.info(
                             "[LIVE_POLL] record_id=%d EventID=%d TimeCreated=%s "
@@ -472,12 +491,14 @@ class SessionOrchestrator:
                         )
 
                         if writer is not None:
-                            await self.ingest_raw_event(
+                            accepted = await self.ingest_raw_event(
                                 raw_event,
                                 writer,
                                 channel="sysmon",
                                 generation=log_generation,
                             )
+                            if accepted and "sysmon" in self._source_outcomes:
+                                self._source_outcomes["sysmon"].live_events_count += 1
                         else:
                             envelope: Envelope[RawEvent] = Envelope(
                                 message_id=f"msg_{uuid.uuid4().hex}",
@@ -503,7 +524,8 @@ class SessionOrchestrator:
                         )
             except asyncio.CancelledError:
                 break
-            except Exception:
+            except Exception as exc:
+                self._record_failure("sysmon", exc)
                 logger.exception("session=%s error in live sysmon poll cycle", session_id)
 
     async def run_session(
@@ -575,7 +597,11 @@ class SessionOrchestrator:
             session_id = new_session_id()
         self._session_id = session_id
         self._seen_event_keys.clear()
-        started_at = datetime.now(timezone.utc)
+        self._published_event_keys.clear()
+        self._failures.clear()
+        self._source_outcomes.clear()
+        self._sysmon_generation = 0
+        started_at = datetime.now(UTC)
         guest_target_path = self._guest_target_path_for(sample)
 
         experiment = resolve_experiment(
@@ -646,14 +672,44 @@ class SessionOrchestrator:
             if self._guest_agent is not None:
                 try:
                     availability = await self._guest_agent.verify_tools()
-                except Exception:
+                except Exception as exc:
+                    self._record_failure("verify_tools", exc)
                     logger.exception(
                         "session=%s guest_agent.verify_tools raised unexpectedly -- continuing anyway",
                         session_id,
                     )
                 else:
-                    if availability.required_missing:
-                        missing = ", ".join(availability.required_missing)
+                    tool_settings = config.http_guest if config.guest_backend == "http" else config.guest_tools
+                    required = bool(tool_settings.tools_required)
+                    effective = {
+                        "sysmon": availability.sysmon_log_available,
+                        "procmon": availability.procmon_available,
+                        "network": availability.tshark_available,
+                    }
+                    diagnostics_method = getattr(self._guest_agent, "get_tool_diagnostics", None)
+                    if diagnostics_method is not None:
+                        try:
+                            diagnostics = await diagnostics_method()
+                            tools = diagnostics.tools
+                            effective["sysmon"] &= bool(tools.get("sysmon", {}).get("available"))
+                            effective["procmon"] &= bool(tools.get("procmon", {}).get("available"))
+                            effective["network"] &= bool(tools.get("tshark", {}).get("available")) and tools.get("npcap", {}).get("service_status") == "Running"
+                        except Exception as exc:
+                            logger.exception("Guest functional tool diagnostics failed")
+                            self._record_failure("verify_tools", exc)
+                            effective = dict.fromkeys(effective, False)
+                    for name, available in (
+                        ("sysmon", effective["sysmon"]),
+                        ("procmon", effective["procmon"]),
+                        ("network", effective["network"]),
+                    ):
+                        configured = bool({"sysmon": tool_settings.sysmon_log, "procmon": tool_settings.procmon_path, "network": tool_settings.tshark_path}[name])
+                        self._source_outcomes[name] = SourceOutcome(enabled=configured, required=required and configured, verified=available)
+                        if configured and not available:
+                            self._record_failure(name, RuntimeError("Guest source unavailable"))
+                    functional_missing = [name for name, outcome in self._source_outcomes.items() if outcome.required and not outcome.verified]
+                    if availability.required_missing or functional_missing:
+                        missing = ", ".join(dict.fromkeys([*availability.required_missing, *functional_missing]))
                         raise SandboxOperationError(
                             "verify_tools",
                             RuntimeError(
@@ -672,12 +728,19 @@ class SessionOrchestrator:
             if self._guest_agent is not None:
                 overridden_sources = {c.source_name for c in self._collectors}
                 try:
-                    await self._guest_agent.start_captures(
+                    capture_status = await self._guest_agent.start_captures(
                         session_id,
                         capture_procmon="procmon" not in overridden_sources,
                         capture_network="network" not in overridden_sources,
                     )
-                except Exception:
+                    if isinstance(capture_status, dict):
+                        for name, started in capture_status.items():
+                            if name in self._source_outcomes:
+                                self._source_outcomes[name].capture_started = started
+                                if not started and name not in overridden_sources:
+                                    self._record_failure(name, RuntimeError("Capture did not start"))
+                except Exception as exc:
+                    self._record_failure("capture_start", exc)
                     # GuestAgent's own methods are documented to never raise
                     # (partial-telemetry guarantee) -- guarded anyway, same
                     # defense-in-depth convention as teardown()/
@@ -696,12 +759,15 @@ class SessionOrchestrator:
                     wm_id = wm_res[0] if isinstance(wm_res, tuple) else getattr(wm_res, "last_record_id", -1)
                     if wm_id >= 0:
                         watermark_record_id = wm_id
+                        if "sysmon" in self._source_outcomes:
+                            self._source_outcomes["sysmon"].capture_started = True
                         logger.info(
                             "session=%s established pre-detonation Sysmon watermark record_id=%d",
                             session_id,
                             watermark_record_id,
                         )
                 except Exception as exc:  # noqa: BLE001
+                    self._record_failure("sysmon", exc)
                     logger.warning(
                         "session=%s failed to query pre-detonation Sysmon watermark: %s",
                         session_id,
@@ -758,13 +824,20 @@ class SessionOrchestrator:
 
             try:
                 await self._controller.detonate(sample)
+            except Exception as exc:
+                logging.getLogger(__name__).exception("Operation failed; applying documented fallback")
+                self._record_failure("detonate", exc)
             finally:
                 if live_poll_task is not None:
                     stop_live_poll.set()
                     try:
                         await asyncio.wait_for(live_poll_task, timeout=2.0)
-                    except (asyncio.TimeoutError, asyncio.CancelledError):
+                    except (TimeoutError, asyncio.CancelledError):
                         live_poll_task.cancel()
+                        try:
+                            await live_poll_task
+                        except asyncio.CancelledError:
+                            pass
 
             # Give constructor-injected collectors a short grace period to
             # pick up trailing telemetry (e.g. process-exit events) before
@@ -798,9 +871,28 @@ class SessionOrchestrator:
                     )
                     artifacts = TelemetryArtifacts()
 
+                collector_artifacts = artifacts
+                if config.guest_backend == "http" and watermark_record_id is None:
+                    self._record_failure("sysmon", RuntimeError("No session watermark; historical Sysmon export retained but not ingested"))
+                    collector_artifacts = TelemetryArtifacts(
+                        sysmon_evtx_path=None,
+                        procmon_csv_path=artifacts.procmon_csv_path,
+                        network_ek_json_path=artifacts.network_ek_json_path,
+                    )
                 guest_collectors = build_collectors_from_telemetry(
-                    session_id, artifacts, watermark_record_id=watermark_record_id
+                    session_id, collector_artifacts,
+                    watermark_record_id=watermark_record_id if self._sysmon_generation == 0 else None,
                 )
+                for name, path in (
+                    ("sysmon", artifacts.sysmon_evtx_path),
+                    ("procmon", artifacts.procmon_csv_path),
+                    ("network", artifacts.network_ek_json_path),
+                ):
+                    outcome = self._source_outcomes.get(name)
+                    if outcome is not None and outcome.enabled and name not in overridden_sources:
+                        outcome.exported = bool(path and Path(path).is_file())
+                        if not outcome.exported:
+                            self._record_failure(name, RuntimeError("No exported artifact"))
                 for collector in guest_collectors:
                     await collector.start()
                     collectors_started = True  # same reasoning as the constructor-injected loop above
@@ -812,6 +904,13 @@ class SessionOrchestrator:
                     )
 
                 if guest_collectors:
+                    for collector in guest_collectors:
+                        await asyncio.wait_for(collector.read_complete.wait(), timeout=120)
+                        outcome = self._source_outcomes.get(collector.source_name)
+                        if collector.source_name == "procmon" and not collector._header_validated:
+                            self._record_failure("procmon", RuntimeError("Exported CSV has no valid header"))
+                        if outcome is not None:
+                            outcome.parsed = not collector.errors
                     # The exported files are already complete and static by
                     # this point -- this sleep only needs to cover one poll
                     # cycle (each collector's default poll_interval is
@@ -827,6 +926,7 @@ class SessionOrchestrator:
             error = "session cancelled (Ctrl-C / task cancellation)"
             logger.warning("session=%s cancelled", session_id)
         except Exception as exc:
+            self._record_failure("execution", exc)
             status = SessionStatus.PARTIAL if collectors_started else SessionStatus.FAILED
             error = f"{type(exc).__name__}: {exc}"
             logger.exception("session=%s failed during %s", session_id, status.value)
@@ -839,26 +939,29 @@ class SessionOrchestrator:
             for collector in (*self._collectors, *guest_collectors):
                 try:
                     await collector.stop()
-                except Exception:
+                    if getattr(collector, "dropped", 0):
+                        self._record_failure(collector.source_name, RuntimeError("Collector dropped buffered events"))
+                    for message in getattr(collector, "errors", []):
+                        self._record_failure(collector.source_name, RuntimeError(message))
+                except Exception as exc:
+                    self._record_failure("collector_stop", exc)
                     logger.exception("session=%s collector=%s failed to stop", session_id, collector.source_name)
 
             for task in (*pump_tasks, *guest_pump_tasks):
                 try:
                     await task
-                except Exception:
+                except Exception as exc:
+                    self._record_failure("ingestion", exc)
                     logger.exception("session=%s a pump task raised unexpectedly", session_id)
 
-            # Published here, before drain() -- not after it, further down
-            # this function -- specifically so a live subscriber still has
-            # a running consumer task to actually receive it. drain()
-            # cancels every consumer task once queues empty, so anything
-            # published after that point would sit forever undelivered.
-            await self._publish_lifecycle(session_id, status, error or "session finished")
-
+            # Drain analysis before cleanup, but publish no terminal success yet.
             try:
                 await self._bus.drain(timeout=self._bus_drain_timeout)
-            except Exception:
-                logger.exception("session=%s bus drain failed", session_id)
+                for message in getattr(self._bus, "errors", []):
+                    self._record_failure("bus_drain", RuntimeError(message))
+            except Exception as exc:
+                self._record_failure("bus_drain", exc)
+                logger.exception("Session bus drain failed")
 
             # Remove the guest proxy/hosts redirect while the VM is still
             # running and the guest agent is reachable; the interceptor
@@ -867,7 +970,8 @@ class SessionOrchestrator:
                 reset_redirect = getattr(self._controller, "reset_network_redirect", None)
                 if reset_redirect is not None:
                     await reset_redirect()
-            except Exception:
+            except Exception as exc:
+                self._record_failure("redirect_cleanup", exc)
                 logger.exception("session=%s guest network redirect cleanup failed", session_id)
 
             # SandboxController.teardown() is documented to never raise
@@ -875,12 +979,37 @@ class SessionOrchestrator:
             # depth, consistent with every other cleanup step above.
             try:
                 await self._controller.teardown()
-            except Exception:
+            except Exception as exc:
+                self._record_failure("teardown", exc)
                 logger.exception("session=%s controller teardown raised unexpectedly", session_id)
 
-            await writer.close()
+            try:
+                await writer.close()
+            except Exception as exc:
+                logging.getLogger(__name__).exception("Operation failed; applying documented fallback")
+                self._record_failure("writer_close", exc)
 
-        ended_at = datetime.now(timezone.utc)
+        if self._failures and status != SessionStatus.ABORTED:
+            status = SessionStatus.PARTIAL if writer.count else SessionStatus.FAILED
+            error = "; ".join(f"{f.stage}: {f.description}" for f in self._failures)
+
+        # Cleanup may change the outcome. Restart consumers solely to deliver
+        # the final lifecycle record, after all failure-producing stages finish.
+        try:
+            await self._bus.start()
+            await self._publish_lifecycle(session_id, status, error or "session finished")
+            await self._bus.drain(timeout=self._bus_drain_timeout)
+        except Exception as exc:
+            self._record_failure("final_lifecycle", exc)
+            logger.exception("Final lifecycle delivery failed")
+            if status != SessionStatus.ABORTED:
+                status = SessionStatus.PARTIAL if writer.count else SessionStatus.FAILED
+                error = "; ".join(f"{f.stage}: {f.description}" for f in self._failures)
+
+        ended_at = datetime.now(UTC)
+        execution = getattr(self._controller, "last_detonation_result", None)
+        execution_pid = getattr(execution, "pid", None)
+        execution_exit_code = getattr(execution, "return_code", None)
 
         return AnalysisSession(
             session_id=session_id,
@@ -893,4 +1022,8 @@ class SessionOrchestrator:
             ended_at=ended_at,
             metrics=SessionMetrics(raw_events=writer.count),
             error=error,
+            source_outcomes=self._source_outcomes,
+            failures=self._failures,
+            execution_pid=execution_pid if isinstance(execution_pid, int) else None,
+            execution_exit_code=execution_exit_code if isinstance(execution_exit_code, int) else None,
         )

@@ -68,6 +68,7 @@ class NetworkCollector(BaseCollector):
             try:
                 chunk = self._read_new_bytes()
             except OSError as exc:
+                self.errors.append(str(exc))
                 logger.warning("source=%s cannot read %s: %s", self.source_name, self._ek_json_path, exc)
                 await asyncio.sleep(self._poll_interval)
                 continue
@@ -84,10 +85,13 @@ class NetworkCollector(BaseCollector):
                             line, session_id=self._session_id, raw_ref=self._ek_json_path
                         )
                     except PcapParseError as exc:
+                        self.errors.append(str(exc))
                         logger.warning("source=%s skipping malformed line: %s", self.source_name, exc)
                         continue
 
                     if event is not None:
                         self._emit(event)
+                        await asyncio.sleep(0)
 
+            self.read_complete.set()
             await asyncio.sleep(self._poll_interval)

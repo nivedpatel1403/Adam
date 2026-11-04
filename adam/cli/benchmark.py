@@ -7,20 +7,19 @@ Typer CLI command for empirical dataset benchmarking across Control and Treatmen
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
 import json
-from pathlib import Path
-import sys
-from typing import Optional
+import logging
 import uuid
+from datetime import UTC, datetime
+from pathlib import Path
+
 import typer
 
 from adam.common.bus import EventBus
-from adam.contracts.enums import Arm, MutationStatus, NetworkMode, SessionStatus
+from adam.contracts.enums import MutationStatus
 from adam.contracts.envelope import Envelope
 from adam.contracts.mutation import MutationResult
 from adam.contracts.raw_event import ProcessInfo, RawEvent
-from adam.contracts.session import AnalysisSession, SampleRef, SessionConfig
 from adam.corpus.manager import CorpusManager, SampleMetadata
 from adam.deception.engine import DeceptionEngine
 from adam.fusion.engine import EventFusionEngine
@@ -57,7 +56,7 @@ def _load_or_generate_events(sample_meta: SampleMetadata, manifest_path: Path | 
     import random
     seed = int(sample_meta.sha256[:16], 16)
     rng = random.Random(seed)
-    start_time = datetime(2026, 8, 5, 9, 0, 0, tzinfo=timezone.utc)
+    start_time = datetime(2026, 8, 5, 9, 0, 0, tzinfo=UTC)
     benign_count = 20 + (seed % 25)
     host = f"WKSTN-{seed % 900 + 100:03d}"
     user = f"user_{seed % 8 + 1}"
@@ -110,9 +109,10 @@ async def _run_arm_pipeline(
     # Publish baseline raw events
     for ev in raw_dicts:
         try:
-            ts = datetime.fromisoformat(ev["timestamp"].replace("Z", "+00:00"))
+            ts = datetime.fromisoformat(ev["timestamp"])
         except Exception:
-            ts = datetime.now(timezone.utc)
+            logging.getLogger(__name__).exception("Operation failed; applying documented fallback")
+            ts = datetime.now(UTC)
 
         proc = None
         if "pid" in ev or "process_name" in ev:
@@ -133,7 +133,7 @@ async def _run_arm_pipeline(
             source_event_id=1,
             category="PROCESS",
             occurred_at=ts,
-            observed_at=datetime.now(timezone.utc),
+            observed_at=datetime.now(UTC),
             process=proc,
             attributes=ev,
         )
@@ -144,7 +144,7 @@ async def _run_arm_pipeline(
             message_type="RawEvent",
             session_id=session_id,
             correlation_id=f"corr_{uuid.uuid4().hex[:8]}",
-            emitted_at=datetime.now(timezone.utc),
+            emitted_at=datetime.now(UTC),
             emitter="benchmark",
             payload=raw_event,
         )

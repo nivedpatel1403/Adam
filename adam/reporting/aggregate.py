@@ -9,14 +9,15 @@ Calculates paired yield delta (Delta Y), Wilcoxon signed-rank non-parametric tes
 from __future__ import annotations
 
 import math
-from typing import Any, Dict, List, Optional
+from typing import Any
+
 from pydantic import BaseModel, Field
 
 
 class PairedSampleMetrics(BaseModel):
     sample_sha256: str
     filename: str
-    family_label: Optional[str] = None
+    family_label: str | None = None
     control_yield: float = Field(ge=0.0)
     treatment_yield: float = Field(ge=0.0)
     delta_yield: float
@@ -67,9 +68,9 @@ class BenchmarkAggregateReport(BaseModel):
     median_delta_yield: float
     confidence_interval_95: ConfidenceInterval
     wilcoxon_test: WilcoxonResult
-    per_sample_pairs: List[PairedSampleMetrics] = Field(default_factory=list)
-    family_breakdowns: List[FamilyBreakdown] = Field(default_factory=list)
-    primitive_plausibility: List[PlausibilityPrimitiveStat] = Field(default_factory=list)
+    per_sample_pairs: list[PairedSampleMetrics] = Field(default_factory=list)
+    family_breakdowns: list[FamilyBreakdown] = Field(default_factory=list)
+    primitive_plausibility: list[PlausibilityPrimitiveStat] = Field(default_factory=list)
 
 
 def calculate_wilcoxon_signed_rank(deltas: list[float]) -> WilcoxonResult:

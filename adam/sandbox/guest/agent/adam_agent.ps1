@@ -1,4 +1,4 @@
-#requires -Version 5.1
+﻿#requires -Version 5.1
 <#
 .SYNOPSIS
     adam_agent.ps1 -- guest-resident HTTP agent entrypoint. The Phase 5
@@ -144,7 +144,7 @@ if (Test-Path -LiteralPath $manifestPath) {
             $Script:BuildId = [string]$manifest.build_id
         }
     } catch {
-        Write-AgentLog -Level WARN -Message "failed to parse build manifest at $manifestPath: $($_.Exception.Message)"
+        Write-AgentLog -Level WARN -Message "failed to parse build manifest at ${manifestPath}: $($_.Exception.Message)"
     }
 }
 $Script:StartTime = Get-Date
@@ -224,7 +224,7 @@ function Invoke-Route {
             return @{ Kind = 'json'; Envelope = (New-SuccessEnvelope -Data @{ status = 'ok'; uptime_s = $uptime }) }
         }
         'GET /version' {
-            return @{ Kind = 'json'; Envelope = (New-SuccessEnvelope -Data @{ agent_version = $Script:AgentVersion; api_version = $Script:ApiVersion; build_id = $Script:BuildId }) }
+            return @{ Kind = 'json'; Envelope = (New-SuccessEnvelope -Data @{ agent_version = $Script:AgentVersion; api_version = $Script:ApiVersion; build_id = $Script:BuildId; capabilities = @('sysmon.events.since', 'diagnostics.tools', 'capture.procmon', 'capture.network') }) }
         }
 
         # ---------------- Filesystem ----------------

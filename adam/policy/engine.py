@@ -10,12 +10,11 @@ from __future__ import annotations
 
 import time
 import uuid
-from typing import Any
 
+from adam.contracts.enums import Verdict
 from adam.contracts.interfaces import IPolicyEngine, SessionContextProtocol
 from adam.contracts.policy_decision import PolicyDecision
 from adam.contracts.semantic_event import SemanticEvent
-from adam.contracts.enums import Verdict
 from adam.policy.compiler import CompiledRule, compile_ruleset
 from adam.policy.loader import RuleLoader
 
@@ -88,36 +87,36 @@ class PolicyEngine(IPolicyEngine):
         if event.confidence < self._global_confidence_gate:
             return (
                 Verdict.SUPPRESSED_CONFIDENCE,
-                f"Confidence {event.confidence:.2f} below global gate "
-                f"{self._global_confidence_gate:.2f}",
+                (f"Confidence {event.confidence:.2f} below global gate "
+                f"{self._global_confidence_gate:.2f}"),
             )
 
         remaining = context.budget_remaining(rule.rule_id, rule.budget.max_per_session)
         if remaining <= 0:
             return (
                 Verdict.SUPPRESSED_BUDGET,
-                f"Rule '{rule.rule_id}' budget exhausted "
-                f"(max {rule.budget.max_per_session} per session)",
+                (f"Rule '{rule.rule_id}' budget exhausted "
+                f"(max {rule.budget.max_per_session} per session)"),
             )
 
         if context.cooldown_active(rule.rule_id, rule.budget.cooldown_seconds):
             return (
                 Verdict.SUPPRESSED_COOLDOWN,
-                f"Rule '{rule.rule_id}' still within its "
-                f"{rule.budget.cooldown_seconds}s cooldown",
+                (f"Rule '{rule.rule_id}' still within its "
+                f"{rule.budget.cooldown_seconds}s cooldown"),
             )
 
         if self._dry_run:
             return (
                 Verdict.DRY_RUN,
-                f"Rule '{rule.rule_id}' matched at confidence {event.confidence:.2f}; "
-                f"dry_run=true so no mutation will be executed",
+                (f"Rule '{rule.rule_id}' matched at confidence {event.confidence:.2f}; "
+                f"dry_run=true so no mutation will be executed"),
             )
 
         return (
             Verdict.EXECUTE,
-            f"Intent '{event.intent}' at confidence {event.confidence:.2f} "
+            (f"Intent '{event.intent}' at confidence {event.confidence:.2f} "
             f"(gate {self._global_confidence_gate:.2f}); "
             f"budget {rule.budget.max_per_session - remaining + 1}/{rule.budget.max_per_session} used; "
-            f"no cooldown active",
+            f"no cooldown active"),
         )

@@ -116,6 +116,7 @@ class ProcmonCollector(BaseCollector):
             try:
                 chunk = self._read_new_bytes()
             except OSError as exc:
+                self.errors.append(str(exc))
                 logger.warning("source=%s cannot read %s: %s", self.source_name, self._csv_path, exc)
                 await asyncio.sleep(self._poll_interval)
                 continue
@@ -133,6 +134,8 @@ class ProcmonCollector(BaseCollector):
                 for line in complete_lines:
                     if not self._header_validated:
                         self._header_validated = self._validate_header(line)
+                        if not self._header_validated:
+                            self.errors.append("Invalid Procmon CSV header")
                         continue  # first non-empty line is always the header, never a data row
 
                     try:
@@ -149,10 +152,13 @@ class ProcmonCollector(BaseCollector):
                             raw_ref=self._csv_path,
                         )
                     except ProcmonParseError as exc:
+                        self.errors.append(str(exc))
                         logger.warning("source=%s skipping malformed row: %s", self.source_name, exc)
                         continue
 
                     self._sequence += 1
                     self._emit(event)
+                    await asyncio.sleep(0)
 
+            self.read_complete.set()
             await asyncio.sleep(self._poll_interval)

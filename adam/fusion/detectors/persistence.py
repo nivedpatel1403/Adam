@@ -1,7 +1,8 @@
-from datetime import datetime, timezone
+from datetime import UTC, datetime
+from typing import ClassVar
 
-from .base import BaseDetector
 from ..models import SemanticEvent
+from .base import BaseDetector
 
 
 class PersistenceDetector(BaseDetector):
@@ -10,7 +11,7 @@ class PersistenceDetector(BaseDetector):
     MITRE ATT&CK: T1547 - Boot or Logon Autostart Execution
     """
 
-    REGISTRY_RUN_KEYS = [
+    REGISTRY_RUN_KEYS: ClassVar[dict[str, str]] = [
         r"currentversion\run",
         r"currentversion\runonce"
     ]
@@ -44,13 +45,8 @@ class PersistenceDetector(BaseDetector):
                     matched.append(event)
 
             # Scheduled Tasks
-            elif process == "schtasks.exe":
+            elif process == "schtasks.exe" or process == "sc.exe" and "create" in command:
                 matched.append(event)
-
-            # Windows Service Creation
-            elif process == "sc.exe":
-                if "create" in command:
-                    matched.append(event)
 
         return matched if matched else None
 
@@ -66,7 +62,7 @@ class PersistenceDetector(BaseDetector):
             })
 
         return SemanticEvent(
-            timestamp=datetime.now(timezone.utc),
+            timestamp=datetime.now(UTC),
             category="Persistence",
             technique_id="T1547",
             severity="MEDIUM",

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import ClassVar
+
 from ..models import RawEvent, SemanticEvent
 from .base import BaseDetector
 
@@ -14,7 +16,7 @@ class CollectionDetector(BaseDetector):
 
     TECHNIQUE_ID = "T1005"
 
-    STRONG_INDICATORS = [
+    STRONG_INDICATORS: ClassVar[dict[str, str]] = [
         "copy-item",
         "robocopy",
         "xcopy",
@@ -23,7 +25,7 @@ class CollectionDetector(BaseDetector):
         "rar.exe",
     ]
 
-    MEDIUM_INDICATORS = [
+    MEDIUM_INDICATORS: ClassVar[dict[str, str]] = [
         "documents",
         "desktop",
         "downloads",
@@ -33,7 +35,7 @@ class CollectionDetector(BaseDetector):
         "archive",
     ]
 
-    WEAK_INDICATORS = [
+    WEAK_INDICATORS: ClassVar[dict[str, str]] = [
         ".docx",
         ".xlsx",
         ".pdf",

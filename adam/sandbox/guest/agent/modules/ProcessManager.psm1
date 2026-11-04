@@ -1,4 +1,4 @@
-#requires -Version 5.1
+﻿#requires -Version 5.1
 <#
 .SYNOPSIS
     ProcessManager.psm1 -- implements docs/phase5-http-agent-api.md
@@ -21,6 +21,7 @@ Set-StrictMode -Version Latest
 # explanation; this was a real, shipped startup crash
 # ("Write-AgentLog is not recognized").
 Import-Module (Join-Path $PSScriptRoot 'Common.psm1')
+$Script:OwnedProcesses = @{}
 
 function Invoke-ProcessStart {
     param(
@@ -39,6 +40,9 @@ function Invoke-ProcessStart {
         }
         if ($Wait -and $result.TimedOut) {
             return New-ErrorEnvelope -ErrorCode $Script:ErrorCodes.Timeout -ErrorMessage "process did not exit within ${TimeoutS}s"
+        }
+        if (-not $Wait) {
+            $Script:OwnedProcesses[$result.Pid] = $result.Process
         }
         return New-SuccessEnvelope -Data @{
             pid       = $result.Pid
@@ -90,7 +94,7 @@ function Invoke-ProcessWait {
         [Parameter(Mandatory = $true)][double]$TimeoutS
     )
     try {
-        $proc = Get-Process -Id $ProcessId -ErrorAction SilentlyContinue
+        $proc = if ($Script:OwnedProcesses.ContainsKey($ProcessId)) { $Script:OwnedProcesses[$ProcessId] } else { Get-Process -Id $ProcessId -ErrorAction SilentlyContinue }
         if (-not $proc) {
             # Already exited -- report as exited rather than NOT_FOUND,
             # since "wait for a process that already finished" is a

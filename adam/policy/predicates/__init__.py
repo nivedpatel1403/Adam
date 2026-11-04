@@ -17,7 +17,7 @@ otherwise conflict on (§10.3).
 
 from __future__ import annotations
 
-from typing import Callable
+from collections.abc import Callable
 
 from adam.contracts.interfaces import SessionContextProtocol
 from adam.contracts.semantic_event import SemanticEvent
@@ -54,4 +54,4 @@ def get_predicate(dotted_name: str) -> PredicateFn:
 
 
 # Import built-ins so their @predicate decorators run and populate the registry.
-from adam.policy.predicates import builtin  # noqa: E402,F401
+from adam.policy.predicates import builtin  # noqa: F401

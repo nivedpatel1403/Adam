@@ -42,6 +42,7 @@ class FakeVBoxClient(VirtualBoxClient):
         super().__init__(vboxmanage_path="VBoxManageMock")
         self.calls: list[tuple[str, ...]] = []
         self.fail_on: str | None = None
+        self._vm_state = "poweroff"
         self._snapshots: list[SnapshotInfo] = [SnapshotInfo(name="clean", uuid="uuid-clean", is_current=True)]
 
     async def _run(self, *args: str, timeout: float | None = None) -> VMOperationResult:
@@ -56,7 +57,13 @@ class FakeVBoxClient(VirtualBoxClient):
                 stdout="",
                 stderr=f"Mock failure on {self.fail_on}",
             )
-        stdout = 'VMState="running"\n' if "showvminfo" in cmd_str else "OK"
+        if args[0] == "startvm":
+            self._vm_state = "running"
+        elif args[0] == "controlvm" and args[-1] in ("acpipowerbutton", "poweroff"):
+            self._vm_state = "poweroff"
+        elif args[0] == "snapshot" and "restore" in args:
+            self._vm_state = "poweroff"
+        stdout = f'VMState="{self._vm_state}"\n' if "showvminfo" in cmd_str else "OK"
         return VMOperationResult(
             success=True,
             command=("VBoxManage", *args),

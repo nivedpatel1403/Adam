@@ -11,8 +11,7 @@ LOCAL STUB — see enums.py note.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from typing import Optional
+from datetime import UTC, datetime
 
 from pydantic import BaseModel, Field
 
@@ -23,10 +22,10 @@ class Change(BaseModel):
     kind: ChangeKind
     target: str
     operation: str  # e.g. "SET", "CREATE", "RESPOND"
-    value: Optional[str] = None
+    value: str | None = None
     # Optional registry value type ("String", "DWord", ...).  None keeps the
     # historical String default for callers that do not care.
-    value_type: Optional[str] = None
+    value_type: str | None = None
 
 
 class MutationResult(BaseModel):
@@ -36,11 +35,11 @@ class MutationResult(BaseModel):
     decision_id: str
     primitive: str  # e.g. "FakeDomainControllerDeception@1.0"
     status: MutationStatus
-    applied_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    applied_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     latency_ms: float = 0.0
     changes: list[Change] = Field(default_factory=list)
     plausibility_score: float = Field(default=1.0, ge=0.0, le=1.0)
     plausibility_notes: str = ""
     revertible: bool = True
     causal_window_ms: int = 30_000
-    error: Optional[str] = None
+    error: str | None = None

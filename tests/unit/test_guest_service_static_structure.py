@@ -281,7 +281,7 @@ def test_procmon_default_path_standardized_across_codebase() -> None:
 
     # scripts/provision_guest_tools.ps1
     prov_script = (root / "scripts" / "provision_guest_tools.ps1").read_text(encoding="utf-8")
-    assert r'[string]$ProcmonDir = "C:\ADAM\Tools\Procmon"' in prov_script
+    assert re.search(r"\[string\]\$ProcmonDir\s*=\s*['\"]C:\\ADAM\\Tools\\Procmon['\"]", prov_script)
 
     # docs/guest-provisioning-guide.md
     guide = (root / "docs" / "guest-provisioning-guide.md").read_text(encoding="utf-8")
@@ -324,13 +324,12 @@ def test_network_convert_checks_exit_code_and_non_empty_file() -> None:
 
 def test_network_start_has_dynamic_host_only_adapter_resolution() -> None:
     """
-    In NetworkManager.psm1, dynamic adapter detection matches Ethernet or 192.168.19.x network,
-    avoiding loopback capture.
+    Match the configured host-only subnet to an adapter GUID, avoiding loopback capture.
     """
     text = (GUEST_AGENT_DIR / "modules" / "NetworkManager.psm1").read_text(encoding="utf-8")
     assert "Resolve-HostOnlyInterfaceIndex" in text
     assert "192.168.19." in text
-    assert "Ethernet" in text
+    assert "InterfaceGuid" in text
     assert "loopback" in text
 
 

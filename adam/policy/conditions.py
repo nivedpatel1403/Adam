@@ -9,7 +9,8 @@ keeps 95% of the rule corpus in reviewable YAML.
 
 from __future__ import annotations
 
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from adam.contracts.interfaces import SessionContextProtocol
 from adam.contracts.semantic_event import SemanticEvent

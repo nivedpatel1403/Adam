@@ -7,37 +7,37 @@ EventFusionEngine, PolicyEngine, and DeceptionEngine.
 import asyncio
 import logging
 import uuid
-from datetime import datetime, timezone
-from typing import List
+from datetime import UTC, datetime
 
+from adam.collectors.network import NetworkCollector
+from adam.collectors.procmon import ProcmonCollector
+from adam.collectors.sysmon import SysmonCollector
 from adam.common.bus import EventBus
 from adam.common.config import get_settings
-from adam.contracts.envelope import Envelope
-from adam.contracts.raw_event import RawEvent
-from adam.fusion.models import RawEvent as FusionRawEvent
-from adam.contracts.semantic_event import SemanticEvent, Actor, AttckRef
-from adam.contracts.policy_decision import PolicyDecision
-from adam.contracts.mutation import MutationResult
 from adam.contracts.enums import Verdict
-from adam.collectors.sysmon import SysmonCollector
-from adam.collectors.procmon import ProcmonCollector
-from adam.collectors.network import NetworkCollector
-from adam.fusion.engine import EventFusionEngine
-from adam.policy.engine import PolicyEngine
-from adam.policy.context import SessionContext
+from adam.contracts.envelope import Envelope
+from adam.contracts.mutation import MutationResult
+from adam.contracts.policy_decision import PolicyDecision
+from adam.contracts.raw_event import RawEvent
+from adam.contracts.semantic_event import Actor, AttckRef, SemanticEvent
 from adam.deception.engine import DeceptionEngine
+from adam.fusion.engine import EventFusionEngine
+from adam.fusion.models import RawEvent as FusionRawEvent
+from adam.policy.context import SessionContext
+from adam.policy.engine import PolicyEngine
 from adam.sandbox.guest.http_channel import HTTPGuestChannel
 
 logger = logging.getLogger(__name__)
 
 from adam.fusion.mapping import map_detection_to_intent
 
+
 class LiveFusionBridge:
     def __init__(self, bus: EventBus, session_id: str):
         self.bus = bus
         self.session_id = session_id
         self.fusion_engine = EventFusionEngine()
-        self.buffer: List[RawEvent] = []
+        self.buffer: list[RawEvent] = []
         self._idx = 0
 
     async def handle_raw_event(self, envelope: Envelope[RawEvent]):
@@ -68,6 +68,7 @@ class LiveFusionBridge:
         try:
             fusion_result = self.fusion_engine.process(fusion_batch)
         except Exception as e:
+            logging.getLogger(__name__).exception("Operation failed; applying documented fallback")
             logger.error(f"Fusion engine process error: {e}")
             return
         
@@ -88,7 +89,7 @@ class LiveFusionBridge:
 
             ts = detection.timestamp
             if ts.tzinfo is None:
-                ts = ts.replace(tzinfo=timezone.utc)
+                ts = ts.replace(tzinfo=UTC)
 
             target_object = next(
                 (
@@ -149,7 +150,7 @@ class LiveFusionBridge:
                 message_type="SemanticEvent",
                 session_id=self.session_id,
                 correlation_id=se.correlation_id,
-                emitted_at=datetime.now(timezone.utc),
+                emitted_at=datetime.now(UTC),
                 emitter="LiveFusionBridge",
                 payload=se
             )
@@ -188,7 +189,7 @@ class LiveOrchestrator:
         self.bus.subscribe(RawEvent, self.fusion_bridge.handle_raw_event, name="fusion_bridge")
         self.bus.subscribe(SemanticEvent, self.handle_semantic_event, name="policy_deception")
         
-        self.tasks: List[asyncio.Task] = []
+        self.tasks: list[asyncio.Task] = []
 
     async def handle_semantic_event(self, envelope: Envelope[SemanticEvent]):
         event = envelope.payload
@@ -200,7 +201,7 @@ class LiveOrchestrator:
                 message_type="PolicyDecision",
                 session_id=self.session_id,
                 correlation_id=event.correlation_id,
-                emitted_at=datetime.now(timezone.utc),
+                emitted_at=datetime.now(UTC),
                 emitter="PolicyEngine",
                 payload=decision
             )
@@ -213,7 +214,7 @@ class LiveOrchestrator:
                     message_type="MutationResult",
                     session_id=self.session_id,
                     correlation_id=event.correlation_id,
-                    emitted_at=datetime.now(timezone.utc),
+                    emitted_at=datetime.now(UTC),
                     emitter="DeceptionEngine",
                     payload=mutation_result
                 )
@@ -227,7 +228,7 @@ class LiveOrchestrator:
                 message_type="RawEvent",
                 session_id=self.session_id,
                 correlation_id=str(uuid.uuid4()),
-                emitted_at=datetime.now(timezone.utc),
+                emitted_at=datetime.now(UTC),
                 emitter=name,
                 payload=event
             )

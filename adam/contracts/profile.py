@@ -6,7 +6,6 @@ VMProfile and hardware/persona configuration models for Phase 2.
 
 from __future__ import annotations
 
-from typing import List, Optional
 from pydantic import BaseModel, ConfigDict, Field
 
 
@@ -21,10 +20,10 @@ class HardwareConfig(BaseModel):
 class DecoyPersona(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    installed_software: List[str] = Field(default_factory=list)
+    installed_software: list[str] = Field(default_factory=list)
     fake_user_documents: bool = Field(default=False)
     fake_browser_history: bool = Field(default=False)
-    hostname_pool: List[str] = Field(default_factory=list)
+    hostname_pool: list[str] = Field(default_factory=list)
 
 
 class GuestAgentConfig(BaseModel):

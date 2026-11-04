@@ -850,8 +850,8 @@ class GuestAgent:
                 _POWERSHELL_PATH,
                 [
                     "-NoProfile", "-NonInteractive", "-Command",
-                    "Get-CimInstance Win32_Process -Filter \"Name='Procmon64.exe'\" | "
-                    "ForEach-Object { \"PID=$($_.ProcessId) SessionId=$($_.SessionId) CommandLine=$($_.CommandLine)\" }",
+                    ("Get-CimInstance Win32_Process -Filter \"Name='Procmon64.exe'\" | "
+                    "ForEach-Object { \"PID=$($_.ProcessId) SessionId=$($_.SessionId) CommandLine=$($_.CommandLine)\" }"),
                 ],
                 self._settings.tool_verify_timeout_s,
                 "Issue #2 diagnostic: Procmon64.exe command line + session ID",

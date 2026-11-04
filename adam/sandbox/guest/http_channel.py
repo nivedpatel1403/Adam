@@ -72,7 +72,11 @@ import httpx
 from pydantic import BaseModel, ValidationError
 
 from adam.common.errors import ContractViolationError, GuestTimeoutError
-from adam.sandbox.guest.agent.agent import TelemetryArtifacts, ToolAvailability, required_missing_tools
+from adam.sandbox.guest.agent.agent import (
+    TelemetryArtifacts,
+    ToolAvailability,
+    required_missing_tools,
+)
 from adam.sandbox.guest.http_models import (
     BackingFileData,
     ErrorCode,
@@ -366,13 +370,13 @@ if ($LASTEXITCODE -ne 0) {{ throw "netsh winhttp set proxy failed with exit code
 
     async def reset_http_proxy(self) -> None:
         """Disable the guest proxy and reset WinHTTP. Always best-effort."""
-        script = f"""$ErrorActionPreference = 'Continue'
+        script = """$ErrorActionPreference = 'Continue'
 $key = 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings'
-if (Test-Path $key) {{
+if (Test-Path $key) {
   New-ItemProperty -Path $key -Name ProxyEnable -Value 0 -PropertyType DWord -Force | Out-Null
-}}
+}
 & netsh.exe winhttp reset proxy | Out-Null
-if ($LASTEXITCODE -ne 0) {{ exit $LASTEXITCODE }}
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 """
         try:
             result = await self._run_powershell(script, label="reset_http_proxy", timeout_s=30.0)
@@ -510,7 +514,8 @@ $filtered = @($lines | Where-Object {{ -not ($_.Contains($hostname) -and $_.Cont
         last_exc: httpx.HTTPError | None = None
         headers = {"X-Adam-Token": self._auth_token} if self._auth_token else None
         req_timeout = timeout or self._default_timeout
-        for attempt in range(1, self._retry_attempts + 1):
+        attempts = 1 if path == "/process/start" else self._retry_attempts
+        for attempt in range(1, attempts + 1):
             try:
                 return await self._client.request(
                     method, path, json=json_body, params=params, headers=headers, timeout=req_timeout
@@ -521,12 +526,12 @@ $filtered = @($lines | Where-Object {{ -not ($_.Contains($hostname) -and $_.Cont
                     try:
                         await self._client.aclose()
                     except Exception:
-                        pass
+                        logging.getLogger(__name__).exception("Operation failed; applying documented fallback")
                     client_headers = {"X-Adam-Token": self._auth_token} if self._auth_token else {}
                     self._client = httpx.AsyncClient(
                         base_url=self._base_url, timeout=self._default_timeout, headers=client_headers
                     )
-                if attempt < self._retry_attempts:
+                if attempt < attempts:
                     self._retry_count += 1
                     backoff = self._retry_backoff_s * (2 ** (attempt - 1))
                     logger.warning(
@@ -654,7 +659,7 @@ $filtered = @($lines | Where-Object {{ -not ($_.Contains($hostname) -and $_.Cont
                     await self._client.aclose()
                     self._client = httpx.AsyncClient(base_url=self._base_url, timeout=self._default_timeout, headers=headers)
                 except Exception:
-                    pass
+                    logging.getLogger(__name__).exception("Operation failed; applying documented fallback")
             return False, f"transport error: {exc}"
 
         if response.status_code != 200:
@@ -841,7 +846,7 @@ $filtered = @($lines | Where-Object {{ -not ($_.Contains($hostname) -and $_.Cont
         *,
         capture_procmon: bool = True,
         capture_network: bool = True,
-    ) -> None:
+    ) -> dict[str, bool]:
         await self._request(
             "POST", "/filesystem/mkdir", json_body=MkdirRequest(path=self._capture_dir).model_dump(),
             label="start_captures: mkdir capture_dir",
@@ -879,6 +884,8 @@ $filtered = @($lines | Where-Object {{ -not ($_.Contains($hostname) -and $_.Cont
             logger.info("[HTTPGuestChannel] session=%s tshark start result=%s", session_id, result)
             if result is not None:
                 self._tshark_started = True
+
+        return {"procmon": self._procmon_started, "network": self._tshark_started}
 
     # ------------------------------------------------------------------ #
     # GuestChannel: stop_export_and_fetch
@@ -941,7 +948,7 @@ $filtered = @($lines | Where-Object {{ -not ($_.Contains($hostname) -and $_.Cont
         current_record_id = record_id
         any_log_reset = False
 
-        while True:
+        for _batch in range(10):
             params: dict[str, Any] = {"record_id": current_record_id, "event_ids": event_ids}
             if channel:
                 params["channel"] = channel
@@ -952,11 +959,12 @@ $filtered = @($lines | Where-Object {{ -not ($_.Contains($hostname) -and $_.Cont
                 label="live_poll: sysmon events since",
             )
             if result is None:
-                return SysmonEventsResult(current_record_id, all_events, any_log_reset)
+                raise RuntimeError("Sysmon polling failed: no valid guest response")
             try:
                 data = SysmonEventsSinceData.model_validate(result)
                 if bool(result.get("log_reset", False)):
                     any_log_reset = True
+                    all_events.clear()
                 all_events.extend(data.events)
                 last_id = data.last_record_id
                 # If guest returned >= 100 records and record_id advanced, continue draining
@@ -965,8 +973,8 @@ $filtered = @($lines | Where-Object {{ -not ($_.Contains($hostname) -and $_.Cont
                     continue
                 return SysmonEventsResult(last_id, all_events, any_log_reset)
             except Exception as exc:
-                logger.warning("Failed to validate SysmonEventsSinceData: %s", exc)
-                return SysmonEventsResult(current_record_id, all_events, any_log_reset)
+                raise RuntimeError("Invalid Sysmon polling response") from exc
+        return SysmonEventsResult(current_record_id, all_events, any_log_reset)
 
     async def _export_procmon(self, session_id: str, host_dir: Path) -> str | None:
         if self._procmon_path is None or not getattr(self, "_procmon_started", False):
@@ -1063,7 +1071,7 @@ $filtered = @($lines | Where-Object {{ -not ($_.Contains($hostname) -and $_.Cont
 
         try:
             envelope = ResponseEnvelope.model_validate(response.json())
-        except Exception as exc:  # noqa: BLE001 -- guest returned unparseable JSON
+        except Exception as exc:
             raise GuestAgentUnreachableError(
                 f"guest agent at {self._base_url}{path} returned an unparseable response "
                 f"(status={response.status_code}): {exc}"
@@ -1081,6 +1089,10 @@ $filtered = @($lines | Where-Object {{ -not ($_.Contains($hostname) -and $_.Cont
     async def get_version(self) -> VersionData:
         """Same raising contract as get_health() -- see the section docstring above."""
         return await self._get_raising("/version", VersionData)
+
+    async def get_tool_diagnostics(self):
+        from adam.sandbox.guest.http_models import ToolsDiagnosticsData
+        return await self._get_raising("/diagnostics/tools", ToolsDiagnosticsData)
 
     async def exists(self, path: str) -> bool:
         """
@@ -1285,6 +1297,12 @@ $filtered = @($lines | Where-Object {{ -not ($_.Contains($hostname) -and $_.Cont
             pid=proc_data.pid,
         )
 
+    async def wait_process(self, pid: int) -> dict[str, Any]:
+        data = await self._request("POST", "/process/wait", json_body={"pid": pid, "timeout_s": 0}, label="process exit status")
+        if data is None:
+            raise RuntimeError("Could not retrieve process exit status")
+        return data
+
     async def terminate_process(
         self,
         pid: int | None = None,
@@ -1311,6 +1329,7 @@ $filtered = @($lines | Where-Object {{ -not ($_.Contains($hostname) -and $_.Cont
             )
             return data.terminated_count
         except Exception as exc:
+            logging.getLogger(__name__).exception("Operation failed; applying documented fallback")
             logger.warning("Failed to validate ProcessTerminateData: %s", exc)
             return 0
 
@@ -1355,6 +1374,7 @@ $filtered = @($lines | Where-Object {{ -not ($_.Contains($hostname) -and $_.Cont
             except GuestAgentError:
                 raise
             except Exception:
+                logging.getLogger(__name__).exception("Operation failed; applying documented fallback")
                 raise GuestAgentError(
                     ErrorCode.ACCESS_DENIED,
                     f"Authentication failed with status {response.status_code}: {response.text}",
@@ -1368,7 +1388,7 @@ $filtered = @($lines | Where-Object {{ -not ($_.Contains($hostname) -and $_.Cont
             except GuestAgentError:
                 raise
             except Exception:
-                pass
+                logging.getLogger(__name__).exception("Operation failed; applying documented fallback")
             raise GuestAgentError(
                 f"HTTP_{response.status_code}",
                 f"Guest agent returned HTTP {response.status_code}: {response.text}",
@@ -1712,11 +1732,11 @@ def encode_sample_for_upload(content: bytes) -> str:
 
 
 __all__ = [
-    "HTTPGuestChannel",
     "ErrorCode",
     "GuestAgentError",
     "GuestAgentUnreachableError",
+    "HTTPGuestChannel",
     "StageResult",
-    "verify_sample_hash",
     "encode_sample_for_upload",
+    "verify_sample_hash",
 ]

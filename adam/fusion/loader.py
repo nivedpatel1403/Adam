@@ -48,7 +48,7 @@ class EventLoader:
             event = RawEvent(
 
                 timestamp=datetime.fromisoformat(
-                    item["timestamp"].replace("Z", "+00:00")
+                    item["timestamp"]
                 ),
 
                 source=item.get("source", "generator"),

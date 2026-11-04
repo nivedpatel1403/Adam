@@ -24,7 +24,12 @@ async def dashboard_index(request: Request):
 
 @dashboard_router.get("/sessions/{session_id}", response_class=HTMLResponse)
 async def dashboard_session_detail(request: Request, session_id: str):
-    from adam.api.main import get_session, get_session_events, get_session_decisions, get_session_mutations
+    from adam.api.main import (
+        get_session,
+        get_session_decisions,
+        get_session_events,
+        get_session_mutations,
+    )
     session = jsonable_encoder(await get_session(session_id))
     events = jsonable_encoder(await get_session_events(session_id))
     decisions = jsonable_encoder(await get_session_decisions(session_id))

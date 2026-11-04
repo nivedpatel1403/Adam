@@ -1,4 +1,4 @@
-#requires -Version 5.1
+﻿#requires -Version 5.1
 <#
 .SYNOPSIS
     AgentConfig.psm1 -- loads the guest agent's own local configuration.

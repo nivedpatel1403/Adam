@@ -1,55 +1,55 @@
 {
-  "build_id": "b4683c1bbdb8bd2f",
-  "created_utc": "2026-11-03T17:08:14.358051+00:00",
+  "build_id": "8871352ee1e512a9",
+  "created_utc": "2026-11-04T05:11:04.670776+00:00",
   "file_count": 12,
   "files": {
     "adam_agent.ps1": {
-      "sha256": "549c40f7a413846ab1b753d65d4de9ce12d3231ae669292df418d54397503deb",
-      "size_bytes": 28390
+      "sha256": "2f9368a8d649d79fb9fda9665318d00d8567b330c9f3a64cbada1183a2ff37fa",
+      "size_bytes": 28495
     },
     "install.ps1": {
-      "sha256": "4c81e990f9864e47330a9a972d6c4dbdb9dc6d50275014c0d546101ffc940768",
-      "size_bytes": 23758
+      "sha256": "c5c3cc684268f19a5c434b84336080ec4dc0a39c8c53cf38d799f2ce78277f45",
+      "size_bytes": 23860
     },
     "modules/AgentConfig.psm1": {
-      "sha256": "241df0f7b2466fcb8039579072345bfebd0bb6748abcf2a14ba0c5a168598679",
-      "size_bytes": 2103
+      "sha256": "a4babfdc3d7438f9421f2bd9441a78d76b73624d13005c326ebc3705f74572b4",
+      "size_bytes": 2106
     },
     "modules/ArtifactManager.psm1": {
-      "sha256": "dea9633909b788397581be63ed14f0480b4e636dfd9c6b1431bfe47a494802ba",
-      "size_bytes": 5944
+      "sha256": "596b3b144aefef24c78d9ac9fc76c151cad540161ccf5a1df0e3d87086dec105",
+      "size_bytes": 5947
     },
     "modules/Common.psm1": {
-      "sha256": "4b0f62af0872ef52cb78256f55ea62972a48bf4af9bf44aa25f91ef0a2a3d226",
-      "size_bytes": 19668
+      "sha256": "36389c2b8bd75de8220aeaa80c8abdf70e51e9d693205edb379d2a05b8b3721d",
+      "size_bytes": 19691
     },
     "modules/DiagnosticsManager.psm1": {
-      "sha256": "cf97aedcd7bf37975606a24fb91a4c730e7234d4d4c7fb933782904532f0c3ac",
-      "size_bytes": 15842
+      "sha256": "fbba1e794415c376f3fa2dd530963850a4ba4a3a11dc9c2f76dbd7aa078dfb44",
+      "size_bytes": 15845
     },
     "modules/FilesystemManager.psm1": {
-      "sha256": "7e7f572508e230d5bad22309586d27fb76c230454822d7388ffb8f82c456bc50",
-      "size_bytes": 7950
+      "sha256": "9fea06ef1227b3cd76573b7a89c1fd3ac2999848006812b286bc764daaefb371",
+      "size_bytes": 7953
     },
     "modules/NetworkManager.psm1": {
-      "sha256": "c277d65c7ae7bbae33869aa0eff950bd93214b8ce2e6ee500a2c322c1d7d3b1a",
-      "size_bytes": 10822
+      "sha256": "d286ac526894cdc3aec0777902d27d890e833243341fa2f44ea557634944450d",
+      "size_bytes": 11220
     },
     "modules/ProcessManager.psm1": {
-      "sha256": "5f4b8c967073fb591fd148707de4f0ec72c8a817d77c1e401994c193cc2e2136",
-      "size_bytes": 6305
+      "sha256": "b603cd9730eb3e1e4b87ae4a12370dd0b68cc510e08f6a68cff169856feffc29",
+      "size_bytes": 6543
     },
     "modules/ProcmonManager.psm1": {
-      "sha256": "b3a4110194a5a02f93613043ebf413ba56fe1bd901ef73911338b3d87a79bc52",
-      "size_bytes": 6576
+      "sha256": "17a2141d82307f88ad64d952500398bd30787c023b767e6a3453da9e220ea874",
+      "size_bytes": 7241
     },
     "modules/SampleManager.psm1": {
-      "sha256": "8586858b482fe7ebf4be576dbd0afa9857d395ef7868a8f91b024a3cb58b5c92",
-      "size_bytes": 5819
+      "sha256": "d2ef4828350d5e9b3e630adfc1ca031cfacb4068f70b57512cafba6e3bf8f545",
+      "size_bytes": 5822
     },
     "modules/SysmonManager.psm1": {
-      "sha256": "4a2b3877404b2b629b32845d97323449d22a15caff4f6f1e6d4af030ae79188a",
-      "size_bytes": 9746
+      "sha256": "5cb34e7c80b27912763edd77b03c123b27997e8e5895aeb394e79b6c5e0b3e74",
+      "size_bytes": 9749
     }
   },
   "version": "1.0.0"

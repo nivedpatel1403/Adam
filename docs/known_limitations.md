@@ -28,15 +28,16 @@ This document lists the known architectural and operational limitations of the A
 ---
 
 ### 3. Procmon & Tshark Telemetry in Golden Image
-- **Status**: **RESOLVED (Standardized Paths + Verified Baseline)**
+- **Status**: **OPEN — standardized source paths; guest capture still requires live verification**
 - **Root Cause**: The legacy guest snapshot (`disk-resized-36gb-c-drive`) lacked `Procmon64.exe` and `tshark.exe` at standardized paths.
 - **Resolution**:
-  - The snapshot has been consolidated into a verified `clean` snapshot.
+  - One recovery snapshot named `clean` is preserved. Its existence does not prove current telemetry capabilities.
   - Standardized the Procmon path on `C:\ADAM\Tools\Procmon\Procmon64.exe` across guest configuration, installer defaults, provisioning scripts, and host configurations.
-  - Staged and verified Tshark and Npcap capture driver on the host-only interface.
+  - Signed Wireshark and Npcap installers were staged on the host during the November 4 repair. Successful guest installation and packet capture have not yet been established.
   - Added automated guest provisioning script `scripts/provision_guest_tools.ps1` and verification harness `scripts/verify_candidate_snapshots.py`.
   - Added `tool_availability` caching to `HTTPGuestChannel` and updated `start_captures()` to gracefully skip missing tools when running with non-strict configuration.
   - Added `tools_required` configuration flag in `config/default.toml` and `adam/common/config.py` (default: `false` for graceful degradation; `true` for strict fail-fast mode).
+  - The verification harness requires distinct candidate/recovery UUIDs, real pipeline artifacts and workload correlation, live Sysmon events, both restore cycles, and VM shutdown. Promotion is opt-in and blocked by incomplete evidence.
 
 ---
 

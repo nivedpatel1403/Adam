@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import ClassVar
+
 from ..models import RawEvent, SemanticEvent
 from .base import BaseDetector
 
@@ -14,7 +16,7 @@ class LateralMovementDetector(BaseDetector):
 
     TECHNIQUE_ID = "T1021"
 
-    STRONG_INDICATORS = [
+    STRONG_INDICATORS: ClassVar[dict[str, str]] = [
         "psexec.exe",
         "wmic process call create",
         "winrs",
@@ -22,7 +24,7 @@ class LateralMovementDetector(BaseDetector):
         "invoke-command",
     ]
 
-    MEDIUM_INDICATORS = [
+    MEDIUM_INDICATORS: ClassVar[dict[str, str]] = [
         "\\\\",
         "net use",
         "admin$",
@@ -31,7 +33,7 @@ class LateralMovementDetector(BaseDetector):
         "sc.exe \\\\",
     ]
 
-    WEAK_INDICATORS = [
+    WEAK_INDICATORS: ClassVar[dict[str, str]] = [
         "remote desktop",
         "rpc",
         "smb",

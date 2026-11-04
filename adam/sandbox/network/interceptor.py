@@ -16,11 +16,10 @@ fixed port.  A live run can configure a host-only address and fixed port in
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import re
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Self
 from urllib.parse import urlsplit, urlunsplit
 
 from aiohttp import web
@@ -222,11 +221,11 @@ class NetworkInterceptor:
             self.shares.clear()
             logger.info("[NetworkInterceptor] Stopped bounded HTTP lure proxy")
 
-    async def __aenter__(self) -> "NetworkInterceptor":
+    async def __aenter__(self) -> Self:
         await self.start()
         return self
 
-    async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+    async def __aexit__(self, exc_type: type[BaseException] | None, exc_val: BaseException | None, exc_tb: object) -> None:
         await self.stop()
 
     # ------------------------------------------------------------------ #
@@ -399,7 +398,7 @@ class NetworkInterceptor:
     @staticmethod
     def _request_url(request: web.Request) -> str:
         raw_path = request.raw_path
-        if raw_path.startswith("http://") or raw_path.startswith("https://"):
+        if raw_path.startswith(("http://", "https://")):
             return raw_path
 
         host = request.host or request.headers.get("Host", "")

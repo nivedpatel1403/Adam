@@ -73,6 +73,11 @@ for control flow on the host side):
 {"success": true, "data": {"agent_version": "1.0.0", "api_version": "1"}}
 ```
 
+Current packages additionally return `build_id` (from the package manifest) and
+`capabilities` (including `sysmon.events.since`, `diagnostics.tools`,
+`capture.procmon`, and `capture.network`). Older agents may omit these fields;
+candidate verification requires the current build and capabilities.
+
 ## 4. Filesystem Manager — `/filesystem/*`
 
 | Method | Path | Request body | `data` on success |
@@ -154,6 +159,7 @@ which one actually produced the file via `mechanism`.
 | GET | `/diagnostics/token` | — | `{"groups": [{"name": str, "attributes": [str]}], "privileges": [{"name": str, "state": str}], "integrity_level": str, "is_elevated": bool}` |
 | GET | `/diagnostics/services?name=` | — | `{"services": [{"name": str, "status": str, "start_type": str}]}` |
 | GET | `/diagnostics/drivers?name=` | — | `{"drivers": [{"name": str, "state": str}]}` |
+| GET | `/diagnostics/tools` | — | `{"tools": {"procmon": object, "tshark": object, "npcap": object, "sysmon": object}}` |
 
 `/diagnostics/token` is the single most direct upgrade this architecture provides over the
 compatibility backend: instead of running `whoami /groups` + `whoami /priv` and treating their

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import ClassVar
+
 from ..models import RawEvent, SemanticEvent
 from .base import BaseDetector
 
@@ -14,7 +16,7 @@ class PrivilegeEscalationDetector(BaseDetector):
 
     TECHNIQUE_ID = "T1068"
 
-    STRONG_INDICATORS = [
+    STRONG_INDICATORS: ClassVar[dict[str, str]] = [
         "token::elevate",
         "getsystem",
         "seimpersonateprivilege",
@@ -22,7 +24,7 @@ class PrivilegeEscalationDetector(BaseDetector):
         "printspoofer",
     ]
 
-    MEDIUM_INDICATORS = [
+    MEDIUM_INDICATORS: ClassVar[dict[str, str]] = [
         "fodhelper.exe",
         "computerdefaults.exe",
         "eventvwr.exe",
@@ -31,7 +33,7 @@ class PrivilegeEscalationDetector(BaseDetector):
         "schtasks /create",
     ]
 
-    WEAK_INDICATORS = [
+    WEAK_INDICATORS: ClassVar[dict[str, str]] = [
         "elevate",
         "admin",
         "system",

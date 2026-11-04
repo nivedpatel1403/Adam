@@ -8,13 +8,11 @@ to the guest VM transfer pipeline.
 
 from __future__ import annotations
 
-import base64
 import hashlib
-import io
 import json
-import os
+import logging
 from pathlib import Path
-from typing import Dict, List, Optional
+
 from pydantic import BaseModel, Field
 
 
@@ -24,17 +22,17 @@ class SampleMetadata(BaseModel):
     filename: str
     size_bytes: int = Field(ge=0)
     file_type: str = "PE32 executable"
-    family_label: Optional[str] = None
-    acquisition_source: Optional[str] = None
-    acquisition_date: Optional[str] = None
-    handling_notes: Optional[str] = None
+    family_label: str | None = None
+    acquisition_source: str | None = None
+    acquisition_date: str | None = None
+    handling_notes: str | None = None
     encrypted_blob_path: str
 
 
 class CorpusManifest(BaseModel):
     corpus_version: str = "1.0"
     description: str = "ADAM Benchmark Corpus"
-    samples: List[SampleMetadata] = Field(default_factory=list)
+    samples: list[SampleMetadata] = Field(default_factory=list)
 
 
 def _derive_key(passphrase: str | bytes, salt: bytes = b"adam_corpus_salt_2026") -> bytes:
@@ -58,7 +56,7 @@ class CorpusManager:
     def __init__(self, manifest_path: str | Path, secret_key: str | bytes = "adam_default_key") -> None:
         self.manifest_path = Path(manifest_path)
         self.secret_key = _derive_key(secret_key)
-        self._samples_by_sha: Dict[str, SampleMetadata] = {}
+        self._samples_by_sha: dict[str, SampleMetadata] = {}
         self._manifest: CorpusManifest | None = None
         self.load_manifest()
 
@@ -72,7 +70,7 @@ class CorpusManager:
         return self._manifest
 
     @property
-    def samples(self) -> List[SampleMetadata]:
+    def samples(self) -> list[SampleMetadata]:
         return list(self._samples_by_sha.values())
 
     def get_metadata(self, sha256: str) -> SampleMetadata:
@@ -120,6 +118,7 @@ class CorpusManager:
                 self.decrypt_in_memory(sample.sha256)
                 results[sample.sha256] = True
             except Exception:
+                logging.getLogger(__name__).exception("Operation failed; applying documented fallback")
                 results[sample.sha256] = False
         return results
 

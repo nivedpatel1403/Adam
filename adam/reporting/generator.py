@@ -1,4 +1,5 @@
-from datetime import datetime, timezone
+import logging
+from datetime import UTC, datetime
 
 from adam.contracts.interfaces import IReportGenerator
 from adam.db.interfaces import (
@@ -15,20 +16,22 @@ def format_local_time(dt, include_ms=False):
         return "N/A"
     if isinstance(dt, str):
         try:
-            dt = datetime.fromisoformat(dt.replace("Z", "+00:00"))
+            dt = datetime.fromisoformat(dt)
         except Exception:
+            logging.getLogger(__name__).exception("Operation failed; applying documented fallback")
             return dt
     try:
         if hasattr(dt, "tzinfo") and dt.tzinfo is not None:
             local_dt = dt.astimezone()
         else:
-            local_dt = dt.replace(tzinfo=timezone.utc).astimezone()
+            local_dt = dt.replace(tzinfo=UTC).astimezone()
         
         fmt = "%Y-%m-%d %H:%M:%S.%f" if include_ms else "%Y-%m-%d %H:%M:%S"
         res = local_dt.strftime(fmt)
         tz_name = local_dt.strftime("%Z") or "Local"
         return f"{res[:-3] if include_ms else res} ({tz_name})"
     except Exception:
+        logging.getLogger(__name__).exception("Operation failed; applying documented fallback")
         return str(dt)
 
 class ReportGenerator(IReportGenerator):
@@ -150,6 +153,7 @@ class ReportGenerator(IReportGenerator):
             try:
                 raw_events = await self.event_repo.get_raw_by_session(session_id)
             except Exception:
+                logging.getLogger(__name__).exception("Operation failed; applying documented fallback")
                 raw_events = []
 
         source_counts = {"Sysmon": 0, "Procmon": 0, "Tshark": 0}
@@ -163,25 +167,19 @@ class ReportGenerator(IReportGenerator):
             elif "TSHARK" in src_upper or "WIRESHARK" in src_upper or "NETWORK" in src_upper:
                 source_counts["Tshark"] += 1
 
-        source_outcomes = {
-            "Sysmon": {
-                "source": "Sysmon",
-                "status": "CAPTURED" if source_counts["Sysmon"] > 0 else "NO_DATA",
-                "events_count": source_counts["Sysmon"],
-            },
-            "Procmon": {
-                "source": "Procmon",
-                "status": "CAPTURED" if source_counts["Procmon"] > 0 else "NO_DATA",
-                "events_count": source_counts["Procmon"],
-            },
-            "Tshark": {
-                "source": "Tshark",
-                "status": "CAPTURED" if source_counts["Tshark"] > 0 else "NO_DATA",
-                "events_count": source_counts["Tshark"],
-            },
-        }
+        source_outcomes = {}
+        for key, label in (("sysmon", "Sysmon"), ("procmon", "Procmon"), ("network", "Tshark")):
+            outcome = session.source_outcomes.get(key)
+            if outcome is None:
+                source_outcomes[label] = {"source": label, "status": "UNVERIFIED", "events_count": source_counts[label]}
+                continue
+            status = "FAILED" if outcome.errors else (
+                "CAPTURED" if outcome.verified and outcome.capture_started and outcome.exported and outcome.parsed and outcome.events_count else
+                "EMPTY" if outcome.verified and outcome.capture_started and outcome.exported and outcome.parsed else "UNVERIFIED"
+            )
+            source_outcomes[label] = {**outcome.model_dump(), "source": label, "status": status}
 
-        failures = []
+        failures = [{"type": f.code, "stage": f.stage, "detail": f.description} for f in session.failures]
         if session.error:
             failures.append({
                 "type": "SessionError",
@@ -202,6 +200,8 @@ class ReportGenerator(IReportGenerator):
             "arm": session.arm.value if hasattr(session.arm, "value") else str(session.arm),
             "status": session.status.value if hasattr(session.status, "value") else str(session.status),
             "error": session.error,
+            "execution_pid": session.execution_pid,
+            "execution_exit_code": session.execution_exit_code,
             "failures": failures,
             "source_outcomes": source_outcomes,
             "started_at": format_local_time(session.started_at),

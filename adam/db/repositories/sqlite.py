@@ -3,22 +3,21 @@ adam/db/repositories/sqlite.py
 
 SQLite-backed repositories for the Database Layer.
 """
-from typing import List, Optional
 
 import aiosqlite
 
-from adam.contracts.session import AnalysisSession
+from adam.contracts.interfaces import ArtifactRef
+from adam.contracts.mutation import MutationResult
+from adam.contracts.policy_decision import PolicyDecision
 from adam.contracts.raw_event import RawEvent
 from adam.contracts.semantic_event import SemanticEvent
-from adam.contracts.policy_decision import PolicyDecision
-from adam.contracts.mutation import MutationResult
-from adam.contracts.interfaces import ArtifactRef
+from adam.contracts.session import AnalysisSession
 from adam.db.interfaces import (
-    ISessionRepository,
-    IEventRepository,
-    IDecisionRepository,
-    IMutationRepository,
     IArtifactRepository,
+    IDecisionRepository,
+    IEventRepository,
+    IMutationRepository,
+    ISessionRepository,
 )
 
 
@@ -41,7 +40,7 @@ class SQLiteSessionRepository(ISessionRepository):
             )
         )
 
-    async def get_by_id(self, session_id: str) -> Optional[AnalysisSession]:
+    async def get_by_id(self, session_id: str) -> AnalysisSession | None:
         async with self.db.execute("SELECT payload FROM sessions WHERE session_id = ?", (session_id,)) as cursor:
             row = await cursor.fetchone()
             if row:
@@ -59,7 +58,7 @@ class SQLiteSessionRepository(ISessionRepository):
             )
         )
 
-    async def list_all(self) -> List[AnalysisSession]:
+    async def list_all(self) -> list[AnalysisSession]:
         sessions = []
         async with self.db.execute("SELECT payload FROM sessions") as cursor:
             async for row in cursor:
@@ -83,7 +82,7 @@ class SQLiteEventRepository(IEventRepository):
             )
         )
 
-    async def get_raw_by_session(self, session_id: str) -> List[RawEvent]:
+    async def get_raw_by_session(self, session_id: str) -> list[RawEvent]:
         events = []
         async with self.db.execute("SELECT payload FROM raw_events WHERE session_id = ? ORDER BY occurred_at ASC", (session_id,)) as cursor:
             async for row in cursor:
@@ -105,7 +104,7 @@ class SQLiteEventRepository(IEventRepository):
             )
         )
 
-    async def get_semantic_by_session(self, session_id: str) -> List[SemanticEvent]:
+    async def get_semantic_by_session(self, session_id: str) -> list[SemanticEvent]:
         events = []
         async with self.db.execute("SELECT payload FROM semantic_events WHERE session_id = ? ORDER BY window_start ASC", (session_id,)) as cursor:
             async for row in cursor:
@@ -132,7 +131,7 @@ class SQLiteDecisionRepository(IDecisionRepository):
             )
         )
 
-    async def get_by_session(self, session_id: str) -> List[PolicyDecision]:
+    async def get_by_session(self, session_id: str) -> list[PolicyDecision]:
         decisions = []
         async with self.db.execute("SELECT payload FROM policy_decisions WHERE session_id = ? ORDER BY decided_at ASC", (session_id,)) as cursor:
             async for row in cursor:
@@ -158,7 +157,7 @@ class SQLiteMutationRepository(IMutationRepository):
             )
         )
 
-    async def get_by_session(self, session_id: str) -> List[MutationResult]:
+    async def get_by_session(self, session_id: str) -> list[MutationResult]:
         mutations = []
         async with self.db.execute("SELECT payload FROM mutations WHERE session_id = ? ORDER BY applied_at ASC", (session_id,)) as cursor:
             async for row in cursor:
@@ -181,7 +180,7 @@ class SQLiteArtifactRepository(IArtifactRepository):
             )
         )
 
-    async def get_by_session(self, session_id: str) -> List[ArtifactRef]:
+    async def get_by_session(self, session_id: str) -> list[ArtifactRef]:
         artifacts = []
         async with self.db.execute("SELECT kind, path, size_bytes FROM artifacts WHERE session_id = ? ORDER BY id ASC", (session_id,)) as cursor:
             async for row in cursor:

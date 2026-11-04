@@ -29,7 +29,7 @@ import logging
 import signal
 from collections.abc import Coroutine
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 import typer
 from pydantic import ValidationError
@@ -49,7 +49,7 @@ _EXIT_CODES: dict[SessionStatus, int] = {
 }
 
 
-def _run_with_graceful_cancellation(coro: "Coroutine[Any, Any, AnalysisSession]") -> AnalysisSession:
+def _run_with_graceful_cancellation(coro: Coroutine[Any, Any, AnalysisSession]) -> AnalysisSession:
     """
     Runs `coro` to completion, installing a SIGINT handler that cancels the
     underlying task rather than letting Python's default KeyboardInterrupt
@@ -91,7 +91,7 @@ def _run_with_graceful_cancellation(coro: "Coroutine[Any, Any, AnalysisSession]"
     """
 
     async def _runner() -> AnalysisSession:
-        task: "asyncio.Task[AnalysisSession]" = asyncio.ensure_future(coro)
+        task: asyncio.Task[AnalysisSession] = asyncio.ensure_future(coro)
 
         def _on_sigint(signum: int, frame: Any) -> None:
             task.cancel()
@@ -116,7 +116,7 @@ def _run_with_graceful_cancellation(coro: "Coroutine[Any, Any, AnalysisSession]"
 
 def run(
     sample_path: str = typer.Argument(..., help="Path to the sample to detonate."),
-    sysmon_evtx_path: Optional[str] = typer.Option(  # noqa: UP007 -- typer needs Optional[X], not X | None, pre-3.10-style unions
+    sysmon_evtx_path: str | None = typer.Option(
         None,
         help=(
             "Testing-only override: a host-accessible Sysmon EVTX file to tail instead of "
@@ -124,7 +124,7 @@ def run(
             "not need this -- see adam/orchestrator/runner.py."
         ),
     ),
-    procmon_csv_path: Optional[str] = typer.Option(
+    procmon_csv_path: str | None = typer.Option(
         None,
         help=(
             "Testing-only override: a host-accessible ProcMon CSV export (with a 'Date & Time' "
@@ -132,7 +132,7 @@ def run(
             "Normal execution should not need this."
         ),
     ),
-    network_ek_json_path: Optional[str] = typer.Option(
+    network_ek_json_path: str | None = typer.Option(
         None,
         help=(
             "Testing-only override: a host-accessible 'tshark -T ek' export to tail instead of "
@@ -157,18 +157,18 @@ def run(
         "--gui",
         help="Start the VirtualBox VM with a visible GUI window. Default is headless.",
     ),
-    profile: Optional[str] = typer.Option(
+    profile: str | None = typer.Option(
         None,
         "--profile",
         "-p",
         help="Hardware profile ID to apply to the sandbox (e.g. bare_control, developer_decoy, enterprise_office_decoy).",
     ),
-    arm: Optional[str] = typer.Option(
+    arm: str | None = typer.Option(
         None,
         "--arm",
         help="Experimental arm: 'control' or 'treatment'. Defaults to [deception] enabled.",
     ),
-    deception: Optional[bool] = typer.Option(
+    deception: bool | None = typer.Option(
         None,
         "--deception/--no-deception",
         help="Override deception enablement for this run (control/treatment is derived from it).",

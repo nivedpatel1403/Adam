@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from typing import ClassVar
 
 from ..models import RawEvent, SemanticEvent
 
@@ -14,9 +15,9 @@ class BaseDetector(ABC):
     need to define their indicators and threshold.
     """
 
-    STRONG_INDICATORS: list[str] = []
-    MEDIUM_INDICATORS: list[str] = []
-    WEAK_INDICATORS: list[str] = []
+    STRONG_INDICATORS: ClassVar[list[str]] = []
+    MEDIUM_INDICATORS: ClassVar[list[str]] = []
+    WEAK_INDICATORS: ClassVar[list[str]] = []
 
     SCORE_THRESHOLD: int = 5
 
@@ -84,7 +85,6 @@ class BaseDetector(ABC):
         Return the subset of events responsible
         for the detection, or None.
         """
-        pass
 
     @abstractmethod
     def build(
@@ -95,4 +95,3 @@ class BaseDetector(ABC):
         Construct the SemanticEvent produced
         by this detector.
         """
-        pass

@@ -130,6 +130,9 @@ class FakeGuestAgentServer:
             exit_code = body.get("mock_exit_code", 0)
             return _envelope({"pid": 5555, "exit_code": exit_code, "stdout": "test_stdout\n", "stderr": ""})
 
+        if method == "POST" and path == "/process/wait":
+            return _envelope({"exited": True, "exit_code": 0})
+
         if method == "GET" and path == "/process/query":
             self.process_query_count += 1
             query_pid = int(params.get("pid", 5555)) if params.get("pid") is not None else 5555
@@ -789,11 +792,12 @@ async def test_sandbox_controller_arm_and_detonate_fallback_on_unreachable(tmp_p
         size_bytes=100,
         file_type="PE32",
     )
-    await ctrl.detonate(sample_ref)
-    assert ctrl.state == SandboxState.COMPLETED
-    # Fallback to run_in_guest was invoked
-    mock_client.run_in_guest.assert_called_once()
-    assert ctrl.last_detonation_result.stdout == "fallback_out"
+    from adam.sandbox.state import SandboxOperationError
+    with pytest.raises(SandboxOperationError):
+        await ctrl.detonate(sample_ref)
+    assert ctrl.state == SandboxState.ERROR
+    # A missing HTTP response must never cause a second workload launch.
+    mock_client.run_in_guest.assert_not_called()
 
 
 async def test_query_processes_raises_typed_errors() -> None:
@@ -895,7 +899,8 @@ async def test_get_sysmon_events_since_drains_multi_page_and_handles_log_reset()
     result = await ch.get_sysmon_events_since(record_id=0)
     last_id, events = result
     assert last_id == 125
-    assert len(events) == 125
+    assert len(events) == 25
+    assert all(item.record_id >= 101 for item in events)
     assert getattr(result, "log_reset", False) is True
 
 

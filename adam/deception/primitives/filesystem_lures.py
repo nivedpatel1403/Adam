@@ -1,12 +1,18 @@
 from __future__ import annotations
-from typing import Any
-import random
+
 import uuid
+from typing import Any
+
 from adam.contracts.enums import ChangeKind, MutationStatus
 from adam.contracts.mutation import Change, MutationResult
 from adam.deception.catalogue import register_primitive
-from adam.deception.plausibility import combine, score_naming_consistency, score_timestamp_consistency
+from adam.deception.plausibility import (
+    combine,
+    score_naming_consistency,
+    score_timestamp_consistency,
+)
 from adam.deception.primitives.base import DeceptionPrimitive
+
 
 @register_primitive("PLANT_DECOY_DOCUMENTS")
 class PlantDecoyDocuments(DeceptionPrimitive):

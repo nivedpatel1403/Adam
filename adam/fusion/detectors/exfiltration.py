@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import ClassVar
+
 from ..models import RawEvent, SemanticEvent
 from .base import BaseDetector
 
@@ -14,7 +16,7 @@ class ExfiltrationDetector(BaseDetector):
 
     TECHNIQUE_ID = "T1041"
 
-    STRONG_INDICATORS = [
+    STRONG_INDICATORS: ClassVar[dict[str, str]] = [
         "rclone",
         "megasync",
         "dropbox.exe",
@@ -23,7 +25,7 @@ class ExfiltrationDetector(BaseDetector):
         "sftp",
     ]
 
-    MEDIUM_INDICATORS = [
+    MEDIUM_INDICATORS: ClassVar[dict[str, str]] = [
         "upload",
         "send-file",
         "aws s3 cp",
@@ -32,7 +34,7 @@ class ExfiltrationDetector(BaseDetector):
         "ftp put",
     ]
 
-    WEAK_INDICATORS = [
+    WEAK_INDICATORS: ClassVar[dict[str, str]] = [
         ".zip",
         ".7z",
         ".rar",

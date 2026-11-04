@@ -9,15 +9,15 @@ exactly where four-way merge conflicts would otherwise happen).
 
 from __future__ import annotations
 
-from typing import Callable, Type
+from collections.abc import Callable
 
 from adam.deception.primitives.base import DeceptionPrimitive
 
-_CATALOGUE: dict[str, Type[DeceptionPrimitive]] = {}
+_CATALOGUE: dict[str, type[DeceptionPrimitive]] = {}
 
 
-def register_primitive(action_name: str) -> Callable[[Type[DeceptionPrimitive]], Type[DeceptionPrimitive]]:
-    def decorator(cls: Type[DeceptionPrimitive]) -> Type[DeceptionPrimitive]:
+def register_primitive(action_name: str) -> Callable[[type[DeceptionPrimitive]], type[DeceptionPrimitive]]:
+    def decorator(cls: type[DeceptionPrimitive]) -> type[DeceptionPrimitive]:
         if action_name in _CATALOGUE:
             raise ValueError(f"Action '{action_name}' already has a registered primitive")
         _CATALOGUE[action_name] = cls
@@ -26,7 +26,7 @@ def register_primitive(action_name: str) -> Callable[[Type[DeceptionPrimitive]],
     return decorator
 
 
-def get_primitive_class(action_name: str) -> Type[DeceptionPrimitive]:
+def get_primitive_class(action_name: str) -> type[DeceptionPrimitive]:
     try:
         return _CATALOGUE[action_name]
     except KeyError as exc:
@@ -38,7 +38,9 @@ def get_primitive_class(action_name: str) -> Type[DeceptionPrimitive]:
 
 import importlib
 import pkgutil
+
 import adam.deception.primitives
+
 
 def _load_all_primitives() -> None:
     package = adam.deception.primitives

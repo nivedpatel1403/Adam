@@ -98,6 +98,26 @@ class SessionMetrics(BaseModel):
     semantic_events_post_mutation: int = Field(default=0, ge=0)
 
 
+class SourceOutcome(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = True
+    required: bool = False
+    verified: bool = False
+    capture_started: bool = False
+    exported: bool = False
+    parsed: bool = False
+    events_count: int = 0
+    live_events_count: int = 0
+    errors: list[str] = Field(default_factory=list)
+
+
+class SessionFailure(BaseModel):
+    stage: str
+    code: str
+    description: str
+
+
 class AnalysisSession(BaseModel):
     """See module docstring. Matches the JSON shape in section 7.6 exactly."""
 
@@ -113,6 +133,10 @@ class AnalysisSession(BaseModel):
     ended_at: datetime | None = None
     metrics: SessionMetrics = Field(default_factory=SessionMetrics)
     error: str | None = None
+    source_outcomes: dict[str, SourceOutcome] = Field(default_factory=dict)
+    failures: list[SessionFailure] = Field(default_factory=list)
+    execution_pid: int | None = None
+    execution_exit_code: int | None = None
 
     @field_validator("started_at", "ended_at")
     @classmethod

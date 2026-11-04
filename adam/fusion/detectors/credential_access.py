@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import ClassVar
+
 from ..models import RawEvent, SemanticEvent
 from .base import BaseDetector
 
@@ -15,7 +17,7 @@ class CredentialAccessDetector(BaseDetector):
     TECHNIQUE_ID = "T1003"
 
 
-    RULES = [
+    RULES: ClassVar[dict[str, str]] = [
         (
             5,
             [

@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Iterable
 from datetime import datetime
-from typing import Iterable
 
 from .correlate import EventCorrelator
 from .detectors.registry import DetectorRegistry
