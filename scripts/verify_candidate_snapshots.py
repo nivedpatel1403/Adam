@@ -39,8 +39,8 @@ import subprocess
 import sys
 import time
 import uuid
-from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from threading import Thread
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -50,10 +50,19 @@ if str(_PROJECT_ROOT) not in sys.path:
 from adam.common.config import get_settings
 from adam.contracts.enums import Arm, SessionStatus
 from adam.orchestrator.runner import Runner
-from adam.sandbox.guest.agent.agent import ToolAvailability
 from adam.sandbox.guest.http_channel import HTTPGuestChannel
-from adam.sandbox.guest.http_models import ExistsData
+from adam.sandbox.shutdown import shutdown_normally
 from adam.sandbox.vbox.client import VirtualBoxClient
+from scripts.vm_acceptance import (
+    RESET_FILE,
+    RESET_KEY,
+    inspect_markers,
+    markers_absent,
+    markers_match,
+    powershell,
+    validate_acceptance,
+    write_markers,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -65,6 +74,7 @@ DEFAULT_VDI_PATH = Path(
     r"C:\Users\NIVED\VirtualBox VMs\Windows\Snapshots\{c86fbab5-1567-4629-a3c3-5f73b5afbb46}.vdi"
 )
 DEFAULT_OUTPUT_FILE = _PROJECT_ROOT / "logs" / "repair-verification" / time.strftime("%Y%m%d-%H%M%S") / "result.json"
+CONTROLLED_REQUESTS: list[dict] = []
 
 
 def check_orphan_vdi(vdi_path: Path, baseline_stat: os.stat_result | None = None) -> dict:
@@ -99,7 +109,7 @@ def check_orphan_vdi(vdi_path: Path, baseline_stat: os.stat_result | None = None
 
 async def wait_for_guest_ready(
     channel: HTTPGuestChannel,
-    timeout_s: float = 180.0,
+    timeout_s: float = 300.0,
     poll_interval_s: float = 3.0,
     settle_delay_s: float = 8.0,
 ) -> bool:
@@ -123,103 +133,39 @@ async def wait_for_guest_ready(
     return False
 
 
-async def check_markers(
-    channel: HTTPGuestChannel,
-    marker_file: str,
-    reg_path: str,
-) -> dict[str, bool]:
-    """Checks whether marker file or registry entry exists in the guest using fast native tools."""
-    file_present = False
-    reg_present = False
+async def check_markers(channel, marker_file: str, reg_path: str) -> dict:
+    return await inspect_markers(channel, marker_file, reg_path)
 
-    # 1. Fast file check via GET /filesystem/exists (runs in ~30ms, no process creation overhead)
+
+async def plant_markers(channel, marker_file: str, reg_path: str, marker_val: str) -> bool:
+    return await write_markers(channel, marker_file, reg_path, marker_val)
+
+
+async def prepare_reset_witness(vbox, channel, vm_name: str, candidate_uuid: str) -> dict:
+    """Plant and read back a witness AFTER Runner has finished its restoration."""
+    witness = {"success": False, "candidate_uuid": candidate_uuid, "token": uuid.uuid4().hex,
+               "file": RESET_FILE, "registry": RESET_KEY}
     try:
-        exists_data = await channel._request(
-            "GET", "/filesystem/exists", params={"path": marker_file}, label=f"check_markers: {marker_file}"
-        )
-        if exists_data is None:
-            return {
-                "file_present": False,
-                "reg_present": False,
-                "error": f"Failed to check marker file at '{marker_file}' (agent unreachable)",
-            }
-        file_present = bool(ExistsData.model_validate(exists_data).exists)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Error checking marker file '%s': %s", marker_file, exc)
-        return {"file_present": False, "reg_present": False, "error": str(exc)}
-
-    # 2. Registry check via reg.exe query
-    clean_reg_path = reg_path.replace("HKLM:\\", "HKLM\\").replace("HKLM:", "HKLM")
-    try:
-        reg_res = await channel.run_process(
-            "reg.exe",
-            ["query", clean_reg_path, "/v", "Marker"],
-            wait=True,
-            timeout_s=25.0,
-        )
-        if reg_res.return_code == 0:
-            reg_present = True
-        elif reg_res.return_code == 1:
-            reg_present = False
-        else:
-            logger.warning(
-                "reg.exe query returned unexpected code %s for '%s': %s",
-                reg_res.return_code, clean_reg_path, reg_res.stderr,
-            )
-            return {
-                "file_present": file_present,
-                "reg_present": False,
-                "error": reg_res.stderr or f"reg query exit {reg_res.return_code}",
-            }
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Error checking marker registry '%s': %s", clean_reg_path, exc)
-        return {"file_present": file_present, "reg_present": False, "error": str(exc)}
-
-    return {"file_present": file_present, "reg_present": reg_present}
-
-
-async def plant_markers(
-    channel: HTTPGuestChannel,
-    marker_file: str,
-    reg_path: str,
-    marker_val: str,
-) -> bool:
-    """Plants marker file and registry entry in the guest using fast native tools."""
-    clean_reg_path = reg_path.replace("HKLM:\\", "HKLM\\").replace("HKLM:", "HKLM")
-    try:
-        # 1. Plant file marker using cmd.exe
-        cmd_str = f'if not exist C:\\ADAM md C:\\ADAM & echo {marker_val} > "{marker_file}"'
-        file_res = await channel.run_process(
-            "cmd.exe",
-            ["/c", cmd_str],
-            wait=True,
-            timeout_s=25.0,
-        )
-        if not file_res.success:
-            logger.warning(
-                "Error planting marker file '%s' (exit_code=%s): %s",
-                marker_file, file_res.return_code, file_res.stderr,
-            )
-            return False
-
-        # 2. Plant registry marker using reg.exe add
-        reg_res = await channel.run_process(
-            "reg.exe",
-            ["add", clean_reg_path, "/v", "Marker", "/d", marker_val, "/f"],
-            wait=True,
-            timeout_s=25.0,
-        )
-        if not reg_res.success:
-            logger.warning(
-                "Error planting marker reg '%s' (exit_code=%s): %s",
-                clean_reg_path, reg_res.return_code, reg_res.stderr,
-            )
-            return False
-
-        return True
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Error planting markers: %s", exc)
-        return False
+        if await vbox.get_state(vm_name) != "poweroff":
+            raise RuntimeError("Reset witness requires completed, powered-off Runner teardown")
+        started = await vbox.start(vm_name, headless=True)
+        if not started.success or not await wait_for_guest_ready(channel):
+            raise RuntimeError("Could not boot current state for reset witness")
+        if not markers_absent(await check_markers(channel, RESET_FILE, RESET_KEY)):
+            raise RuntimeError("Reset witness was already present or unreadable")
+        if not await plant_markers(channel, RESET_FILE, RESET_KEY, witness["token"]):
+            raise RuntimeError("Reset witness could not be planted and read back")
+        witness["observed"] = await check_markers(channel, RESET_FILE, RESET_KEY)
+        witness["success"] = markers_match(witness["observed"], witness["token"])
+    except Exception as exc:
+        logger.exception("Restore witness preparation failed")
+        witness["error"] = str(exc)
+    finally:
+        witness["vm_stopped"] = await stop_vm_cleanly(vbox, vm_name)
+        witness["success"] = witness["success"] and witness["vm_stopped"]
+        if witness["success"]:
+            witness["disk"] = await current_disk_fingerprint(vbox, vm_name)
+    return witness
 
 
 async def run_benign_workload(
@@ -257,7 +203,7 @@ async def stop_vm_cleanly(
     vm_name: str,
     timeout_s: float = 90.0,
 ) -> bool:
-    """Stops VM gracefully via ACPI power button, falling back to poweroff."""
+    """Require normal shutdown; leave a stalled guest intact for diagnosis."""
     state = await vbox.get_state(vm_name)
     if state == "poweroff":
         return True
@@ -265,178 +211,190 @@ async def stop_vm_cleanly(
         return False
 
     logger.info("Stopping VM '%s' (current_state=%s)...", vm_name, state)
-    await vbox.stop(vm_name, mode="acpi")
-    res = await vbox.wait_for_state(vm_name, "poweroff", timeout=timeout_s)
-    if res.success:
+    settings = get_settings().http_guest
+    channel = HTTPGuestChannel(base_url=settings.base_url, auth_token=settings.auth_token,
+        capture_dir=settings.capture_dir, procmon_path=settings.procmon_path,
+        tshark_path=settings.tshark_path, sysmon_log=settings.sysmon_log)
+    try:
+        stopped = await shutdown_normally(vbox, vm_name, channel=channel, timeout=timeout_s)
+    finally:
+        await channel.aclose()
+    if stopped:
         await asyncio.sleep(3.0)
         return True
 
-    logger.warning("ACPI shutdown timed out for '%s', sending unconditional poweroff", vm_name)
-    await vbox.stop(vm_name, mode="poweroff")
-    res = await vbox.wait_for_state(vm_name, "poweroff", timeout=15.0)
-    await asyncio.sleep(3.0)
-    # The VM is safe to leave powered off, but this was not a clean shutdown.
+    logger.error("ACPI shutdown timed out for '%s'; preserving current state", vm_name)
     return False
 
 
+async def current_disk_fingerprint(vbox, vm_name: str) -> dict:
+    info = await vbox._run("showvminfo", vm_name, "--machinereadable")
+    if not info.success:
+        raise RuntimeError(info.stderr)
+    fields = {}
+    for line in info.stdout.splitlines():
+        if "=" in line:
+            key, value = line.split("=", 1)
+            fields[key.strip('"')] = value.strip('"')
+    disk = fields.get("SATA-ImageUUID-0-0")
+    snapshot = fields.get("CurrentSnapshotUUID")
+    if not disk or not snapshot:
+        raise RuntimeError("Current disk/snapshot UUID is unavailable")
+    return {"disk_uuid": disk, "snapshot_uuid": snapshot}
+
+
 async def run_verification_cycle(
-    vbox: VirtualBoxClient,
-    channel: HTTPGuestChannel,
-    vm_name: str,
-    snapshot_name: str,
-    cycle_index: int,
-    prior_marker_file: str | None = None,
-    prior_reg_path: str | None = None,
-    ready_timeout_s: float = 180.0,
+    vbox, channel, vm_name: str, snapshot_name: str, cycle_index: int,
+    prior_marker_file=None, prior_reg_path=None, ready_timeout_s=300,
+    reset_witness=None, evidence_root=None,
 ) -> dict:
-    """Executes a single restore-run-verify cycle."""
-    logger.info("=== Starting Cycle %d (snapshot=%s) ===", cycle_index, snapshot_name)
-    cycle_marker = f"ADAM_VERIFY_CYCLE_{cycle_index}_{uuid.uuid4().hex[:8]}"
-    marker_file = f"C:\\ADAM\\run_marker_{cycle_index}.txt"
-    reg_path = f"HKLM\\Software\\ADAM\\Cycle{cycle_index}"
-
-    cycle_result: dict = {
-        "cycle": cycle_index,
-        "marker": cycle_marker,
-        "snapshot": snapshot_name,
-        "restore_success": False,
-        "pre_clean_verified": False,
-        "guest_ready": False,
-        "workload_executed": False,
-        "telemetry_verified": False,
-        "vm_stopped": False,
-    }
-
-    # 1. Stop VM if running
+    """Verify the actual Runner restore/boot, without a redundant preflight boot."""
+    marker = f"ADAM_VERIFY_CYCLE_{cycle_index}_{uuid.uuid4().hex[:8]}"
+    result = {"cycle": cycle_index, "marker": marker, "snapshot": snapshot_name,
+              **{key: False for key in ("restore_success", "pre_clean_verified", "guest_ready",
+                 "workload_executed", "telemetry_verified", "vm_stopped", "marker_planted")},
+              "restore_operations": []}
     if not await stop_vm_cleanly(vbox, vm_name):
-        cycle_result["error"] = "Could not shut down before restoration"
-        return cycle_result
-
-    # 2. Restore snapshot
-    logger.info("Cycle %d: Restoring snapshot '%s'...", cycle_index, snapshot_name)
-    restore_res = await vbox.restore_snapshot(vm_name, snapshot_name)
-    if not restore_res.success:
-        logger.error("Failed to restore snapshot: %s", restore_res.stderr)
-        cycle_result["error"] = f"Restore failed: {restore_res.stderr}"
-        return cycle_result
-    cycle_result["restore_success"] = True
-    await asyncio.sleep(3.0)
-
-    # 3. Start VM
-    logger.info("Cycle %d: Starting VM '%s'...", cycle_index, vm_name)
-    start_res = await vbox.start(vm_name, headless=True)
-    if not start_res.success:
-        logger.error("Failed to start VM: %s", start_res.stderr)
-        cycle_result["error"] = f"Start VM failed: {start_res.stderr}"
-        return cycle_result
-
-    # 4. Wait for guest agent
-    ready = await wait_for_guest_ready(channel, timeout_s=ready_timeout_s)
-    cycle_result["guest_ready"] = ready
-    if not ready:
-        logger.error("Cycle %d: Guest agent not ready within timeout", cycle_index)
-        await stop_vm_cleanly(vbox, vm_name)
-        return cycle_result
-
-    # 5. Verify pre-clean state (and verify prior cycle artifacts are completely absent)
-    curr_markers = await check_markers(channel, marker_file, reg_path)
-    is_pre_clean = (
-        "error" not in curr_markers
-        and not curr_markers.get("file_present", False)
-        and not curr_markers.get("reg_present", False)
-    )
-
-    if prior_marker_file and prior_reg_path:
-        prior_markers = await check_markers(channel, prior_marker_file, prior_reg_path)
-        is_prior_clean = (
-            "error" not in prior_markers
-            and not prior_markers.get("file_present", False)
-            and not prior_markers.get("reg_present", False)
-        )
-        cycle_result["state_reset_verified"] = is_prior_clean
-        is_pre_clean = is_pre_clean and is_prior_clean
-
-    cycle_result["pre_clean_verified"] = is_pre_clean
-    if not is_pre_clean:
-        logger.error("Cycle %d: Pre-clean state verification FAILED! Leftover artifacts detected", cycle_index)
-
-    # 8. Verify telemetry source responsiveness
-    diag = await channel.verify_tools()
-    is_valid_diag = isinstance(diag, ToolAvailability)
-    telemetry_ready = (
-        is_valid_diag
-        and (diag.sysmon_log_available and diag.procmon_available and diag.tshark_available)
-        and not diag.required_missing
-    )
-    cycle_result["tools_ready"] = bool(telemetry_ready)
-    # Tool presence is a prerequisite, never capture evidence.
-    cycle_result["telemetry_verified"] = False
-    cycle_result["tools"] = {
-        "procmon_available": diag.procmon_available,
-        "tshark_available": diag.tshark_available,
-        "sysmon_log_available": diag.sysmon_log_available,
-        "detail": diag.detail,
-        "required_missing": list(diag.required_missing),
-    } if is_valid_diag else None
-    if not telemetry_ready:
-        detail_msg = diag.detail if is_valid_diag else "Invalid ToolAvailability response"
-        logger.warning("Cycle %d: Telemetry readiness verification failed: %s", cycle_index, detail_msg)
-        cycle_result["telemetry_warning"] = f"Telemetry tools not ready: {detail_msg}"
-    elif is_pre_clean:
+        result["error"] = "Could not shut down before restoration"
+        return result
+    if cycle_index == 2:
         try:
-            version = await channel.get_version()
-            manifest = json.loads((_PROJECT_ROOT / "adam/sandbox/guest/agent/build_manifest.json").read_text(encoding="utf-8"))
-            if version.build_id != manifest["build_id"] or not {"sysmon.events.since", "diagnostics.tools"}.issubset(version.capabilities):
-                raise RuntimeError("Guest build or required capabilities do not match the package")
-            diagnostics = await channel.get_tool_diagnostics()
-            cycle_result["diagnostics"] = diagnostics.model_dump()
-            if diagnostics.tools.get("npcap", {}).get("service_status") != "Running":
-                raise RuntimeError("Npcap capture driver is not running")
-            evidence = DEFAULT_OUTPUT_FILE.parent / cycle_marker
-            evidence.mkdir(parents=True, exist_ok=True)
-            sample = evidence / f"{cycle_marker}.exe"
-            compiler = Path(os.environ["WINDIR"]) / "Microsoft.NET/Framework64/v4.0.30319/csc.exe"
-            await asyncio.to_thread(subprocess.run, [str(compiler), "/nologo", f"/out:{sample}", str(_PROJECT_ROOT / "scripts/verification_workload.cs")], check=True, capture_output=True)
-            if not await stop_vm_cleanly(vbox, vm_name):
-                raise RuntimeError("Could not shut down before pipeline run")
-            settings = get_settings().model_copy(deep=True)
-            settings.sandbox.snapshot_name = snapshot_name
-            settings.http_guest.tools_required = True
-            settings.http_guest.tshark_interface = "auto"
-            settings.live.enabled = True
-            session = await Runner(settings).run(str(sample.resolve()), artifacts_dir=evidence,
-                arm=Arm.CONTROL if cycle_index == 1 else Arm.TREATMENT)
-            (evidence / "session.json").write_text(session.model_dump_json(indent=2), encoding="utf-8")
-            cycle_result["session_id"] = session.session_id
-            cycle_result["session_status"] = session.status.value
-            cycle_result["source_outcomes"] = {k: v.model_dump() for k, v in session.source_outcomes.items()}
-            rows = [json.loads(line) for line in (evidence / session.session_id / "raw.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
-            correlation = {}
-            for source in ("SYSMON", "PROCMON"):
-                relevant = [row for row in rows if row["source"].upper() == source]
-                correlation[f"{source}.process"] = any(cycle_marker in json.dumps(row) for row in relevant if row["category"].upper() == "PROCESS")
-                correlation[f"{source}.file"] = any(f"run_marker_{cycle_index}.txt" in json.dumps(row) for row in relevant if row["category"].upper() == "FILE")
-                correlation[f"{source}.registry"] = any(f"cycle{cycle_index}" in json.dumps(row).lower() for row in relevant if row["category"].upper() == "REGISTRY")
-            correlation["network"] = any("192.168.19.2" in json.dumps(row) and "18080" in json.dumps(row)
-                for row in rows if row["source"].upper() in ("TSHARK", "NETWORK"))
-            cycle_result["marker_correlation"] = correlation
-            cycle_result["marker_planted"] = all(value for key, value in correlation.items() if key.endswith((".file", ".registry")))
-            cycle_result["workload_executed"] = session.status == SessionStatus.COMPLETED and session.execution_exit_code == 0
-            outcomes = session.source_outcomes
-            cycle_result["telemetry_verified"] = bool(cycle_result["workload_executed"]
-                and all(correlation.values()) and outcomes.get("sysmon") and outcomes["sysmon"].live_events_count > 0
-                and all(outcomes.get(k) and outcomes[k].verified and outcomes[k].capture_started
-                    and outcomes[k].exported and outcomes[k].parsed and not outcomes[k].errors
-                    for k in ("sysmon", "procmon", "network")))
+            if not reset_witness or not reset_witness.get("success") or reset_witness.get("candidate_uuid") != snapshot_name:
+                raise RuntimeError("A successful candidate-bound reset witness is required")
+            fingerprint = await current_disk_fingerprint(vbox, vm_name)
+            result["reset_before_restore"] = {"observation": reset_witness["observed"], "disk": fingerprint}
+            if fingerprint != reset_witness.get("disk") or not markers_match(reset_witness["observed"], reset_witness["token"]):
+                raise RuntimeError("An intermediate restore or changed reset witness invalidates the proof")
         except Exception as exc:
-            logger.exception("Normal pipeline verification failed")
-            cycle_result["error"] = str(exc)
+            logger.exception("Restore witness continuity check failed")
+            result["error"] = str(exc)
+            return result
+    evidence = Path(evidence_root or DEFAULT_OUTPUT_FILE.parent) / marker
+    evidence.mkdir(parents=True, exist_ok=True)
+    sample = evidence / (marker + ".exe")
+    compiler = Path(os.environ["WINDIR"]) / "Microsoft.NET/Framework64/v4.0.30319/csc.exe"
+    settings = get_settings().model_copy(deep=True)
+    settings.sandbox.snapshot_name = snapshot_name
+    settings.sandbox.guest_ready_timeout_s = max(ready_timeout_s, settings.sandbox.guest_ready_timeout_s)
+    settings.http_guest.tools_required = True
+    settings.http_guest.tshark_interface = "auto"
+    settings.network.host = settings.network.host_ip = "192.168.19.2"
+    settings.live.enabled = True
 
-    # 9. Stop VM cleanly
-    cycle_result["vm_stopped"] = await stop_vm_cleanly(vbox, vm_name)
-    logger.info("=== Finished Cycle %d: pre_clean=%s, workload=%s ===", cycle_index, is_pre_clean, cycle_result["workload_executed"])
+    class VerificationRunner(Runner):
+        def _build_guest_channel(self, client, config, **kwargs):
+            runtime = super()._build_guest_channel(client, config, **kwargs)
+            active = runtime.channel
+            original_restore = client.restore_snapshot
+            original_verify = active.verify_tools
+            original_export = active.stop_export_and_fetch
+            inspected = False
 
-    return cycle_result
+            async def restore(vm, snapshot):
+                if snapshot != snapshot_name:
+                    raise RuntimeError("Runner requested an unexpected snapshot")
+                operation = await original_restore(vm, snapshot)
+                result["restore_operations"].append({"snapshot_uuid": snapshot, "success": operation.success})
+                result["restore_success"] = result["restore_success"] or operation.success
+                return operation
+
+            async def verify():
+                nonlocal inspected
+                availability = await original_verify()
+                if inspected:
+                    return availability
+                if not result["restore_success"]:
+                    raise RuntimeError("Guest checks were reached without a successful Runner restore")
+                result["guest_ready"] = (await active.get_health()).status == "ok"
+                version = await active.get_version()
+                expected = json.loads((_PROJECT_ROOT / "adam/sandbox/guest/agent/build_manifest.json").read_text(encoding="utf-8"))["build_id"]
+                if version.build_id != expected:
+                    raise RuntimeError("Running guest build does not match the package")
+                result["guest_build"] = version.build_id
+                result["diagnostics"] = (await active.get_tool_diagnostics()).model_dump()
+                result["tools_ready"] = bool(availability.procmon_available and availability.tshark_available
+                    and availability.sysmon_log_available and not availability.required_missing)
+                if not result["tools_ready"] or result["diagnostics"]["tools"].get("npcap", {}).get("service_status") != "Running":
+                    raise RuntimeError("Mandatory guest tools are not ready")
+                for cycle in (1, 2):
+                    observation = await check_markers(active, f"C:\\ADAM\\run_marker_{cycle}.txt", f"HKLM\\Software\\ADAM\\Cycle{cycle}")
+                    if not markers_absent(observation):
+                        raise RuntimeError("Workload markers are present or unreadable after Runner restore")
+                witness_after = await check_markers(active, RESET_FILE, RESET_KEY)
+                result["pre_clean_verified"] = markers_absent(witness_after)
+                if not result["pre_clean_verified"]:
+                    raise RuntimeError("Reset witness is present or unreadable after Runner restore")
+                if cycle_index == 2:
+                    result["reset_after_restore"] = witness_after
+                    result["state_reset_verified"] = True
+                inspected = True
+                return availability
+
+            client.restore_snapshot = restore
+            active.verify_tools = verify
+            async def export(*args, **export_kwargs):
+                try:
+                    response = await powershell(active, f"[IO.File]::ReadAllText('C:\\ADAM\\{marker}_c2_response.txt')")
+                    result["c2_response"] = response.strip()
+                    expected_body = "ADAM verification response" if cycle_index == 1 else "fake_c2_payload"
+                    result["c2_effect_verified"] = result["c2_response"] == expected_body
+                    (evidence / "c2-response.txt").write_text(response, encoding="utf-8")
+                except Exception as exc:
+                    logger.exception("Controlled C2 response verification failed")
+                    result["c2_probe_error"] = str(exc)
+                    result["c2_effect_verified"] = False
+                return await original_export(*args, **export_kwargs)
+            active.stop_export_and_fetch = export
+            return runtime
+
+    try:
+        await asyncio.to_thread(subprocess.run, [str(compiler), "/nologo", f"/out:{sample}", str(_PROJECT_ROOT / "scripts/verification_workload.cs")], check=True, capture_output=True)
+        session = await VerificationRunner(settings).run(str(sample.resolve()), artifacts_dir=evidence,
+            arm=Arm.CONTROL if cycle_index == 1 else Arm.TREATMENT)
+        (evidence / "session.json").write_text(session.model_dump_json(indent=2), encoding="utf-8")
+        result.update(session_id=session.session_id, session_status=session.status.value,
+                      source_outcomes={key: value.model_dump() for key, value in session.source_outcomes.items()})
+        correlation = {f"{source}.{kind}": False for source in ("SYSMON", "PROCMON") for kind in ("process", "file", "registry")}
+        correlation["network"] = False
+        with (evidence / session.session_id / "raw.jsonl").open(encoding="utf-8") as stream:
+            for line in stream:
+                if not line.strip():
+                    continue
+                row = json.loads(line)
+                source, category = row["source"].upper(), row["category"].lower()
+                text = json.dumps(row)
+                if source in ("SYSMON", "PROCMON"):
+                    if category == "process" and marker in text:
+                        correlation[f"{source}.process"] = True
+                    if category == "file" and f"run_marker_{cycle_index}.txt" in text:
+                        correlation[f"{source}.file"] = True
+                    if category == "registry" and f"cycle{cycle_index}" in text.lower():
+                        correlation[f"{source}.registry"] = True
+                if source in ("NETWORK", "WIRESHARK", "TSHARK") and "192.168.19.2" in text and "18080" in text:
+                    correlation["network"] = True
+        requests = [request for request in CONTROLLED_REQUESTS if request["path"] == "/" + marker]
+        (evidence / "controlled-requests.json").write_text(json.dumps(requests, indent=2), encoding="utf-8")
+        token_in_packets = False
+        for packet_file in evidence.rglob("network.ek.json"):
+            with packet_file.open(encoding="utf-8") as stream:
+                token_in_packets = token_in_packets or any(marker in line for line in stream)
+        correlation["network_unique_request"] = bool(requests and token_in_packets)
+        correlation["c2_effect"] = result.get("c2_effect_verified") is True
+        result["marker_correlation"] = correlation
+        result["marker_planted"] = all(value for key, value in correlation.items() if key.endswith((".file", ".registry")))
+        result["workload_executed"] = session.status == SessionStatus.COMPLETED and session.execution_exit_code == 0
+        outcomes = session.source_outcomes
+        result["telemetry_verified"] = bool(result["workload_executed"] and all(correlation.values())
+            and outcomes.get("sysmon") and outcomes["sysmon"].live_events_count > 0
+            and all(outcomes.get(key) and outcomes[key].verified and outcomes[key].capture_started
+                and outcomes[key].exported and outcomes[key].parsed and not outcomes[key].errors
+                for key in ("sysmon", "procmon", "network")))
+    except Exception as exc:
+        logger.exception("Normal pipeline verification failed")
+        result["error"] = str(exc)
+    finally:
+        result["vm_stopped"] = await stop_vm_cleanly(vbox, vm_name)
+    return result
 
 
 async def promote_candidate_to_clean(
@@ -445,6 +403,7 @@ async def promote_candidate_to_clean(
     candidate_name: str,
     recovery_name: str,
     verification: dict | None = None,
+    acceptance_file: str | Path | None = None,
 ) -> dict:
     """
     Deletes the old recovery snapshot and renames the candidate snapshot to 'clean'.
@@ -461,6 +420,12 @@ async def promote_candidate_to_clean(
 
     if not verification or verification.get("candidate_uuid") != candidate_name or not verification.get("cycles_passed"):
         promotion["error"] = "Successful verification bound to the candidate UUID is required"
+        return promotion
+
+    acceptance = validate_acceptance(acceptance_file, candidate_name)
+    promotion["acceptance"] = acceptance
+    if not acceptance["success"]:
+        promotion["error"] = acceptance["error"]
         return promotion
 
     snapshots = await vbox.list_snapshots(vm_name)
@@ -518,6 +483,8 @@ async def verify_final_baseline(vbox, channel, vm_name, candidate_uuid) -> dict:
         expected = json.loads((_PROJECT_ROOT / "adam/sandbox/guest/agent/build_manifest.json").read_text(encoding="utf-8"))["build_id"]
         if (await channel.get_version()).build_id != expected:
             raise RuntimeError("Final baseline runs a different agent build")
+        if not markers_absent(await check_markers(channel, RESET_FILE, RESET_KEY)):
+            raise RuntimeError("Final baseline contains a reset witness or could not be checked")
         for cycle in (1, 2):
             markers = await check_markers(channel, f"C:\\ADAM\\run_marker_{cycle}.txt", f"HKLM\\Software\\ADAM\\Cycle{cycle}")
             if "error" in markers or markers["file_present"] or markers["reg_present"]:
@@ -584,30 +551,34 @@ async def _run_harness(args: argparse.Namespace) -> int:
     recovery_snap = recoveries[0].uuid
 
     # 2. Execute 2 consecutive cycles
+    required_checks = ("restore_success", "guest_ready", "pre_clean_verified", "marker_planted",
+                       "workload_executed", "telemetry_verified", "vm_stopped")
     channel1 = _create_channel()
     try:
         cycle1 = await run_verification_cycle(
-            vbox, channel1, vm_name, target_candidate, cycle_index=1
+            vbox, channel1, vm_name, target_candidate, cycle_index=1, evidence_root=output_path.parent
         )
     finally:
         await channel1.aclose()
 
+    reset_witness = {"success": False, "error": "Cycle one did not pass"}
     channel2 = _create_channel()
     try:
-        cycle2 = await run_verification_cycle(
-            vbox,
-            channel2,
-            vm_name,
-            target_candidate,
-            cycle_index=2,
-            prior_marker_file="C:\\ADAM\\run_marker_1.txt",
-            prior_reg_path="HKLM\\Software\\ADAM\\Cycle1",
-        )
+        cycle2 = {"cycle": 2, "error": "Cycle one did not pass"}
+        if all(cycle1.get(key) is True for key in required_checks):
+            reset_witness = await prepare_reset_witness(vbox, channel2, vm_name, target_candidate)
+            if reset_witness["success"]:
+                cycle2 = await run_verification_cycle(
+                    vbox, channel2, vm_name, target_candidate, cycle_index=2,
+                    prior_marker_file="C:\\ADAM\\run_marker_1.txt",
+                    prior_reg_path="HKLM\\Software\\ADAM\\Cycle1",
+                    reset_witness=reset_witness, evidence_root=output_path.parent,
+                )
+            else:
+                cycle2 = {"cycle": 2, "error": "Reset witness could not be established"}
     finally:
         await channel2.aclose()
 
-    required_checks = ("restore_success", "guest_ready", "pre_clean_verified", "marker_planted",
-                       "workload_executed", "telemetry_verified", "vm_stopped")
     cycles_passed = all(c.get(key) is True for c in (cycle1, cycle2) for key in required_checks)
     cycles_passed = cycles_passed and cycle2.get("state_reset_verified") is True
     pre_promotion_health = None
@@ -627,6 +598,7 @@ async def _run_harness(args: argparse.Namespace) -> int:
         promotion_result = await promote_candidate_to_clean(
             vbox, vm_name, target_candidate, recovery_snap,
             verification={"candidate_uuid": target_candidate, "cycles_passed": cycles_passed},
+            acceptance_file=getattr(args, "acceptance_file", None),
         )
         if promotion_result.get("success"):
             channel = _create_channel()
@@ -642,7 +614,7 @@ async def _run_harness(args: argparse.Namespace) -> int:
     logger.info("Final unregistered VDI check: %s", vdi_final)
 
     # 5. Build final machine-readable result
-    promotion_passed = promotion_result is None or promotion_result.get("success", False)
+    promotion_passed = (not args.promote) or bool(promotion_result and promotion_result.get("success"))
     overall_passed = bool(cycles_passed and vdi_final.get("untouched", True) and promotion_passed)
 
     final_result = {
@@ -651,6 +623,7 @@ async def _run_harness(args: argparse.Namespace) -> int:
         "candidate_snapshot": target_candidate,
         "recovery_snapshot": recovery_snap,
         "cycles": [cycle1, cycle2],
+        "reset_witness": reset_witness,
         "cycles_passed": cycles_passed,
         "promotion": promotion_result,
         "pre_promotion_health": pre_promotion_health,
@@ -668,6 +641,7 @@ async def _run_harness(args: argparse.Namespace) -> int:
 
 class VerificationHTTPHandler(BaseHTTPRequestHandler):
     def do_GET(self):
+        CONTROLLED_REQUESTS.append({"path": self.path, "peer": self.client_address[0], "timestamp": time.time()})
         self.send_response(200)
         self.end_headers()
         self.wfile.write(b"ADAM verification response")
@@ -678,6 +652,7 @@ class VerificationHTTPHandler(BaseHTTPRequestHandler):
 
 async def run_harness(args: argparse.Namespace) -> int:
     # The workload intentionally targets only this host-only address.
+    CONTROLLED_REQUESTS.clear()
     server = ThreadingHTTPServer(("192.168.19.2", 18080), VerificationHTTPHandler)
     thread = Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -696,6 +671,7 @@ def main() -> None:
     parser.add_argument("--recovery-snapshot", default="clean", help="Old recovery snapshot (default: clean)")
     parser.add_argument("--output-file", default=str(DEFAULT_OUTPUT_FILE), help="Output result JSON file")
     parser.add_argument("--vdi-path", default=str(DEFAULT_VDI_PATH), help="Path to orphan 4 GiB VDI")
+    parser.add_argument("--acceptance-file", help="Candidate/revision/build-bound evidence record required for promotion")
     parser.add_argument(
         "--guest-url",
         default="http://192.168.19.102:8765",

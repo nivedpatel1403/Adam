@@ -20,6 +20,27 @@ def client():
         yield c
 
 
+def test_persisted_failure_survives_api_cache_reset(client, mock_session):
+    from adam.contracts.session import SourceOutcome, SessionFailure
+
+    async def persist_failure():
+        session = await deps.session_repo.get_by_id(mock_session)
+        session.status = SessionStatus.FAILED
+        session.source_outcomes = {"network": SourceOutcome(required=True, errors=["export failed"])}
+        session.failures = [SessionFailure(stage="export", code="EXPORT_FAILED", description="export failed")]
+        await deps.session_repo.update(session)
+        await deps.db_conn.commit()
+    asyncio.run(persist_failure())
+    # The cache still claims COMPLETED. Durable final state must win.
+    response = client.get(f"/api/v1/sessions/{mock_session}")
+    assert response.json()["metadata"]["status"] == "FAILED"
+    del sessions_store[mock_session]
+    assert mock_session in client.get("/api/v1/sessions").json()["sessions"]
+    metadata = client.get(f"/api/v1/sessions/{mock_session}").json()["metadata"]
+    assert metadata["source_outcomes"]["network"]["errors"] == ["export failed"]
+    assert metadata["failures"][0]["code"] == "EXPORT_FAILED"
+
+
 @pytest.fixture
 def mock_session(client):
     session_id = "test_dash_session"

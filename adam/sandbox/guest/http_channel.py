@@ -61,6 +61,7 @@ import asyncio
 import base64
 import hashlib
 import ipaddress
+import json
 import logging
 import re
 import time
@@ -88,7 +89,6 @@ from adam.sandbox.guest.http_models import (
     NetworkConvertRequest,
     NetworkInterfacesData,
     NetworkStartRequest,
-    NetworkStopRequest,
     ProcessInfo,
     ProcessQueryData,
     ProcessStartData,
@@ -97,7 +97,6 @@ from adam.sandbox.guest.http_models import (
     ProcessTerminateRequest,
     ProcmonExportRequest,
     ProcmonStartRequest,
-    ProcmonStopRequest,
     ResponseEnvelope,
     SampleStageData,
     SampleStageRequest,
@@ -514,7 +513,9 @@ $filtered = @($lines | Where-Object {{ -not ($_.Contains($hostname) -and $_.Cont
         last_exc: httpx.HTTPError | None = None
         headers = {"X-Adam-Token": self._auth_token} if self._auth_token else None
         req_timeout = timeout or self._default_timeout
-        attempts = 1 if path == "/process/start" else self._retry_attempts
+        # A lost response does not prove a mutation failed. Retrying starts or
+        # exports can launch duplicate processes against the same output file.
+        attempts = self._retry_attempts if method.upper() == "GET" else 1
         for attempt in range(1, attempts + 1):
             try:
                 return await self._client.request(
@@ -740,11 +741,10 @@ $filtered = @($lines | Where-Object {{ -not ($_.Contains($hostname) -and $_.Cont
                 raise GuestTimeoutError(
                     f"HTTP guest agent at {self._base_url} did not become healthy within "
                     f"{effective_timeout:.1f}s ({attempt} attempt(s), polling GET /health every "
-                    f"{self._readiness_poll_interval_s:.1f}s; last elapsed={elapsed:.1f}s). The VM/guest "
-                    "OS itself was already confirmed reachable by SandboxController.prepare()'s existing "
-                    "wait_for_guest_ready() check before this method ever ran -- this is specifically the "
-                    "guest-resident HTTP agent (adam_agent.ps1) never responding healthy on top of an "
-                    f"already-booted VM, not a VM boot failure. Last observed state: {detail}"
+                    f"{self._readiness_poll_interval_s:.1f}s; last elapsed={elapsed:.1f}s). "
+                    "HTTP readiness alone cannot distinguish a stalled guest, unavailable networking, "
+                    "or an agent service failure. "
+                    f"Last observed state: {detail}"
                 )
 
             await asyncio.sleep(self._readiness_poll_interval_s)
@@ -854,20 +854,12 @@ $filtered = @($lines | Where-Object {{ -not ($_.Contains($hostname) -and $_.Cont
 
         self._procmon_started = False
         self._tshark_started = False
-
-        if capture_procmon and self._procmon_path is not None and (self._tool_availability is None or self._tool_availability.procmon_available):
-            pml_path = self._guest_path(f"{session_id}_procmon.pml")
-            result = await self._request(
-                "POST", "/procmon/start",
-                json_body=ProcmonStartRequest(session_id=session_id, backing_file=pml_path).model_dump(),
-                label="start_captures: procmon",
-            )
-            logger.info("[HTTPGuestChannel] session=%s procmon start result=%s", session_id, result)
-            if result is not None:
-                self._procmon_started = True
+        self._procmon_start_attempted = False
+        self._tshark_start_attempted = False
 
         if capture_network and self._tshark_path is not None and (self._tool_availability is None or self._tool_availability.tshark_available):
-            interfaces = await self._request("GET", "/network/interfaces", label="start_captures: list interfaces")
+            self._tshark_start_attempted = True
+            interfaces = await self._request("GET", "/network/interfaces", timeout=30.0, label="start_captures: list interfaces")
             if interfaces is not None:
                 logger.info(
                     "[HTTPGuestChannel] session=%s available interfaces: %s",
@@ -879,11 +871,23 @@ $filtered = @($lines | Where-Object {{ -not ($_.Contains($hostname) -and $_.Cont
                 json_body=NetworkStartRequest(
                     session_id=session_id, interface=self._tshark_interface, pcap_path=pcap_path
                 ).model_dump(),
-                label="start_captures: tshark",
+                timeout=60.0, label="start_captures: tshark",
             )
             logger.info("[HTTPGuestChannel] session=%s tshark start result=%s", session_id, result)
             if result is not None:
                 self._tshark_started = True
+
+        if capture_procmon and self._procmon_path is not None and (self._tool_availability is None or self._tool_availability.procmon_available):
+            self._procmon_start_attempted = True
+            pml_path = self._guest_path(f"{session_id}_procmon.pml")
+            result = await self._request(
+                "POST", "/procmon/start",
+                json_body=ProcmonStartRequest(session_id=session_id, backing_file=pml_path).model_dump(),
+                timeout=30.0, label="start_captures: procmon",
+            )
+            logger.info("[HTTPGuestChannel] session=%s procmon start result=%s", session_id, result)
+            if result is not None:
+                self._procmon_started = True
 
         return {"procmon": self._procmon_started, "network": self._tshark_started}
 
@@ -903,9 +907,26 @@ $filtered = @($lines | Where-Object {{ -not ($_.Contains($hostname) -and $_.Cont
         host_dir = Path(host_artifact_dir)
         host_dir.mkdir(parents=True, exist_ok=True)
 
+        # Freeze all captures before any export/download. Otherwise tshark
+        # captures the telemetry downloads themselves (including large CSVs),
+        # inflating the pcap and causing conversion timeouts and memory pressure.
+        stopped = {"procmon": False, "network": False}
+        for source, started, endpoint in (
+            ("procmon", getattr(self, "_procmon_start_attempted", False), "/procmon/stop"),
+            ("network", getattr(self, "_tshark_start_attempted", False), "/network/stop"),
+        ):
+            if started:
+                result = await self._request(
+                    "POST", endpoint, json_body={"session_id": session_id},
+                    timeout=30.0, label=f"stop_export_and_fetch: {source} stop",
+                )
+                stopped[source] = bool(result and result.get("stopped") is True)
+                if not stopped[source]:
+                    logger.error("guest_http: session=%s %s did not confirm capture shutdown", session_id, source)
+
         sysmon_path = await self._export_sysmon(session_id, host_dir) if export_sysmon else None
-        procmon_path = await self._export_procmon(session_id, host_dir) if export_procmon else None
-        network_path = await self._export_network(session_id, host_dir) if export_network else None
+        procmon_path = await self._export_procmon(session_id, host_dir) if export_procmon and stopped["procmon"] else None
+        network_path = await self._export_network(session_id, host_dir) if export_network and stopped["network"] else None
 
         return TelemetryArtifacts(
             sysmon_evtx_path=sysmon_path,
@@ -918,6 +939,7 @@ $filtered = @($lines | Where-Object {{ -not ($_.Contains($hostname) -and $_.Cont
         result = await self._request(
             "POST", "/sysmon/export",
             json_body=SysmonExportRequest(channel=self._sysmon_log, output_path=guest_evtx).model_dump(),
+            timeout=30.0,
             label="stop_export_and_fetch: sysmon export",
         )
         if result is None:
@@ -982,12 +1004,6 @@ $filtered = @($lines | Where-Object {{ -not ($_.Contains($hostname) -and $_.Cont
         pml_path = self._guest_path(f"{session_id}_procmon.pml")
         csv_path = self._guest_path(f"{session_id}_procmon.csv")
 
-        await self._request(
-            "POST", "/procmon/stop",
-            json_body=ProcmonStopRequest(session_id=session_id).model_dump(),
-            label="stop_export_and_fetch: procmon stop",
-        )
-
         backing = await self._request(
             "GET", "/procmon/verify-backing-file", params={"path": pml_path}, label="stop_export_and_fetch: verify pml"
         )
@@ -1001,11 +1017,36 @@ $filtered = @($lines | Where-Object {{ -not ($_.Contains($hostname) -and $_.Cont
         result = await self._request(
             "POST", "/procmon/export",
             json_body=ProcmonExportRequest(pml_path=pml_path, csv_path=csv_path).model_dump(),
+            timeout=135.0,
             label="stop_export_and_fetch: procmon export",
         )
         if result is None:
             return None
-        return await self._fetch_file(csv_path, host_dir / "procmon.csv", label=f"session={session_id} procmon")
+        downloaded = await self._fetch_file(csv_path, host_dir / "procmon.csv", label=f"session={session_id} procmon")
+        if downloaded is None:
+            return None
+        from adam.collectors.parsers.pml import normalize_procmon_csv, requires_time_context
+        if await asyncio.to_thread(requires_time_context, Path(downloaded)):
+            escaped_pml = pml_path.replace("'", "''")
+            escaped_csv = csv_path.replace("'", "''")
+            metadata = await self._run_powershell(
+                f"$ErrorActionPreference='Stop'; @{{started_at=(Get-Item -LiteralPath '{escaped_pml}').CreationTime.ToString('o'); "
+                f"ended_at=(Get-Item -LiteralPath '{escaped_csv}').LastWriteTime.ToString('o')}} | ConvertTo-Json -Compress",
+                label="Procmon capture timestamp context", timeout_s=30,
+            )
+            if metadata.return_code != 0:
+                logger.error("Procmon timestamp context unavailable: %s", metadata.stderr)
+                return None
+            try:
+                context = json.loads(metadata.stdout)
+                (host_dir / "procmon-capture-context.json").write_text(json.dumps(context, indent=2), encoding="utf-8")
+                raw = host_dir / "procmon.raw.csv"
+                Path(downloaded).replace(raw)
+                await asyncio.to_thread(normalize_procmon_csv, raw, Path(downloaded), **context)
+            except Exception:
+                logger.exception("Procmon time-only export could not be resolved against guest timestamps")
+                return None
+        return downloaded
 
     async def _export_network(self, session_id: str, host_dir: Path) -> str | None:
         if self._tshark_path is None or not getattr(self, "_tshark_started", False):
@@ -1013,15 +1054,15 @@ $filtered = @($lines | Where-Object {{ -not ($_.Contains($hostname) -and $_.Cont
         pcap_path = self._guest_path(f"{session_id}_network.pcapng")
         ek_path = self._guest_path(f"{session_id}_network.ek.json")
 
-        await self._request(
-            "POST", "/network/stop",
-            json_body=NetworkStopRequest(session_id=session_id).model_dump(),
-            label="stop_export_and_fetch: tshark stop",
-        )
-
+        # Keep the primary capture even if conversion fails. The EK file alone
+        # is not sufficient for independently checking packet contents.
+        capture = await self._fetch_file(pcap_path, host_dir / "network.pcapng", label=f"session={session_id} pcap")
+        if capture is None:
+            return None
         result = await self._request(
             "POST", "/network/convert",
             json_body=NetworkConvertRequest(pcap_path=pcap_path, ek_json_path=ek_path).model_dump(),
+            timeout=75.0,
             label="stop_export_and_fetch: tshark convert",
         )
         if result is None:

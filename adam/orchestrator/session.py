@@ -956,6 +956,10 @@ class SessionOrchestrator:
 
             # Drain analysis before cleanup, but publish no terminal success yet.
             try:
+                # prepare() can fail before normal consumer startup. Deliver
+                # its queued lifecycle records rather than timing out on an
+                # unstarted bus and inventing an additional drain failure.
+                await self._bus.start()
                 await self._bus.drain(timeout=self._bus_drain_timeout)
                 for message in getattr(self._bus, "errors", []):
                     self._record_failure("bus_drain", RuntimeError(message))

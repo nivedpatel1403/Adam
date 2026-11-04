@@ -166,6 +166,28 @@ async def test_database_shutdown_is_bounded_and_keeps_uncommitted_events():
 
 
 @pytest.mark.asyncio
+async def test_prepare_failure_delivers_queued_lifecycle_without_drain_failure(tmp_path):
+    controller = SimpleNamespace(
+        prepare=AsyncMock(side_effect=RuntimeError("guest never became ready")),
+        teardown=AsyncMock(), vm_profile="mock", last_detonation_result=None,
+    )
+    bus = EventBus()
+    statuses = []
+    async def collect(envelope):
+        statuses.append(envelope.payload.status)
+    bus.subscribe(SessionLifecycle, collect, name="early_failure_lifecycle")
+    settings = Settings(sandbox={"vm_name": "mock", "guest_username": "mock", "guest_password": "mock"})
+    owner = SessionOrchestrator(controller, bus, [], artifacts_dir=tmp_path, bus_drain_timeout=0.05)
+    sample = SampleRef(sha256="0"*64, md5="0"*32, filename="test.exe", size_bytes=1, file_type="exe")
+    session = await owner.run_session(sample, settings, host_sample_path="unused")
+    assert session.status == SessionStatus.FAILED
+    assert statuses == [SessionStatus.PENDING, SessionStatus.PREPARING, SessionStatus.FAILED]
+    assert [failure.stage for failure in session.failures] == ["execution"]
+    assert not bus.errors
+    controller.teardown.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_cleanup_failure_is_the_final_published_status(tmp_path):
     controller = SimpleNamespace(prepare=AsyncMock(), arm=AsyncMock(), detonate=AsyncMock(),
         teardown=AsyncMock(side_effect=RuntimeError("cleanup failed")),

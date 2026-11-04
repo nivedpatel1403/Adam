@@ -342,6 +342,7 @@ if ($sourceRoot -ieq $resolvedInstallDir) {
 } else {
     Copy-Item -Path (Join-Path $sourceRoot 'adam_agent.ps1') -Destination $resolvedInstallDir -Force
     Copy-Item -Path (Join-Path $sourceRoot 'install.ps1') -Destination $resolvedInstallDir -Force
+    Copy-Item -Path (Join-Path $sourceRoot 'sysmon.xml') -Destination $resolvedInstallDir -Force
     $manifestSource = Join-Path $sourceRoot 'build_manifest.json'
     if (Test-Path -LiteralPath $manifestSource) {
         Copy-Item -Path $manifestSource -Destination $resolvedInstallDir -Force

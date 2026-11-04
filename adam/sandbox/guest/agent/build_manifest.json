@@ -1,15 +1,15 @@
 {
-  "build_id": "8871352ee1e512a9",
-  "created_utc": "2026-11-04T05:11:04.670776+00:00",
-  "file_count": 12,
+  "build_id": "9162ca3b10c63871",
+  "created_utc": "2026-11-04T17:23:04.827945+00:00",
+  "file_count": 13,
   "files": {
     "adam_agent.ps1": {
       "sha256": "2f9368a8d649d79fb9fda9665318d00d8567b330c9f3a64cbada1183a2ff37fa",
       "size_bytes": 28495
     },
     "install.ps1": {
-      "sha256": "c5c3cc684268f19a5c434b84336080ec4dc0a39c8c53cf38d799f2ce78277f45",
-      "size_bytes": 23860
+      "sha256": "5bcf864069512fb6d662aee46ee7f80d50b0ecfc55ed216b8f8f598efcfd883c",
+      "size_bytes": 23958
     },
     "modules/AgentConfig.psm1": {
       "sha256": "a4babfdc3d7438f9421f2bd9441a78d76b73624d13005c326ebc3705f74572b4",
@@ -20,8 +20,8 @@
       "size_bytes": 5947
     },
     "modules/Common.psm1": {
-      "sha256": "36389c2b8bd75de8220aeaa80c8abdf70e51e9d693205edb379d2a05b8b3721d",
-      "size_bytes": 19691
+      "sha256": "317dfe1e291b098b33c922f5d1916a160eb54e48e1563b3ca5335a2727b0fb97",
+      "size_bytes": 20435
     },
     "modules/DiagnosticsManager.psm1": {
       "sha256": "fbba1e794415c376f3fa2dd530963850a4ba4a3a11dc9c2f76dbd7aa078dfb44",
@@ -32,8 +32,8 @@
       "size_bytes": 7953
     },
     "modules/NetworkManager.psm1": {
-      "sha256": "d286ac526894cdc3aec0777902d27d890e833243341fa2f44ea557634944450d",
-      "size_bytes": 11220
+      "sha256": "423fa1a1d040cd6f100e55025e961a10244b8f4772ccdc3d8b75cc26c4d9ca1b",
+      "size_bytes": 10893
     },
     "modules/ProcessManager.psm1": {
       "sha256": "b603cd9730eb3e1e4b87ae4a12370dd0b68cc510e08f6a68cff169856feffc29",
@@ -48,8 +48,12 @@
       "size_bytes": 5822
     },
     "modules/SysmonManager.psm1": {
-      "sha256": "5cb34e7c80b27912763edd77b03c123b27997e8e5895aeb394e79b6c5e0b3e74",
-      "size_bytes": 9749
+      "sha256": "fb652a158703d668a7584eae1817ee9bc644ccd5f4a6534e4956b1fb17464195",
+      "size_bytes": 8857
+    },
+    "sysmon.xml": {
+      "sha256": "b7d4357e488090e5cf15e5aa0ddc5659be741398d4c3f56564abcb36b9bc91bf",
+      "size_bytes": 468
     }
   },
   "version": "1.0.0"

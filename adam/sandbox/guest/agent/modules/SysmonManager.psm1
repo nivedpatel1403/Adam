@@ -90,125 +90,81 @@ function Get-SysmonDiagnostics {
 
 function Get-SysmonEventsSince {
     param(
-        [Parameter(Mandatory = $false)][int]$RecordId = 0,
+        [Parameter(Mandatory = $false)][long]$RecordId = 0,
         [Parameter(Mandatory = $false)][string]$EventIds = '1,3',
         [Parameter(Mandatory = $false)][string]$Channel = 'Microsoft-Windows-Sysmon/Operational'
     )
+    $reader = $null
+    $latestReader = $null
     try {
-        $wevtutil = Join-Path $env:WINDIR 'System32\wevtutil.exe'
-        $latestResult = Invoke-NativeProcess -FilePath $wevtutil -ArgumentList @('qe', $Channel, '/c:1', '/rd:true', '/f:xml') -TimeoutMs 5000
-        $currentMaxId = 0
-        if (-not $latestResult.TimedOut -and $latestResult.ExitCode -eq 0 -and (-not [string]::IsNullOrWhiteSpace($latestResult.StdOut))) {
-            try {
-                $xmlDoc = [xml]$latestResult.StdOut.Trim()
-                $currentMaxId = [long]$xmlDoc.Event.System.EventRecordID
-            } catch { }
-        }
-
-        if ($RecordId -lt 0) {
-            return New-SuccessEnvelope -Data @{
-                last_record_id = $currentMaxId
-                log_reset      = $false
-                events         = @()
-            }
-        }
-
-        # EventIds is interpolated into an XPath. Reject anything that is
-        # not a plain integer rather than silently dropping the bad token.
         $idParts = @()
         foreach ($id in $EventIds.Split(',')) {
             $trimmed = $id.Trim()
             if ($trimmed -notmatch '^\d+$') {
-                return New-ErrorEnvelope -ErrorCode $Script:ErrorCodes.InvalidArgument -ErrorMessage "EventIds must be comma-separated integers; invalid token: '$trimmed'"
+                return New-ErrorEnvelope -ErrorCode $Script:ErrorCodes.InvalidArgument -ErrorMessage 'EventIds must be comma-separated integers'
             }
-            $idParts += "EventID=$trimmed"
+            $idParts += "EventID=$([int]$trimmed)"
         }
-        if ($idParts.Count -eq 0) {
-            return New-ErrorEnvelope -ErrorCode $Script:ErrorCodes.InvalidArgument -ErrorMessage "EventIds must contain at least one EventID"
+        $latestQuery = New-Object System.Diagnostics.Eventing.Reader.EventLogQuery($Channel, [System.Diagnostics.Eventing.Reader.PathType]::LogName, '*')
+        $latestQuery.ReverseDirection = $true
+        $latestReader = New-Object System.Diagnostics.Eventing.Reader.EventLogReader($latestQuery)
+        $latest = $latestReader.ReadEvent()
+        $currentMaxId = 0L
+        if ($latest) {
+            try { $currentMaxId = [long]$latest.RecordId } finally { $latest.Dispose() }
         }
-        $idClause = "($($idParts -join ' or ')) and "
-
-        # Handle log reset: if current maximum record ID in the channel is less than requested ID,
-        # the log was cleared or reset. Signal log_reset = true and query from start.
-        $logReset = $false
-        $cursor = [long]$RecordId
-        if ($RecordId -gt 0 -and $currentMaxId -gt 0 -and $currentMaxId -lt $RecordId) {
-            $logReset = $true
-            $cursor = 0
+        if ($RecordId -lt 0) {
+            return New-SuccessEnvelope -Data @{last_record_id=$currentMaxId;log_reset=$false;events=@()}
         }
-
-        # Multi-page draining loop: fetch batches of up to 100 records until channel is drained
-        $events = @()
-        $maxRecordId = if ($logReset) { $currentMaxId } else { [long]$RecordId }
-        $batchSize = 100
-        $maxIterations = 500
-
-        for ($iter = 0; $iter -lt $maxIterations; $iter++) {
-            $xpath = "*[System[${idClause}EventRecordID > $cursor]]"
-            $result = Invoke-NativeProcess -FilePath $wevtutil -ArgumentList @('qe', $Channel, "/q:$xpath", '/f:xml', "/c:$batchSize") -TimeoutMs 10000
-            if ($result.TimedOut -or $result.ExitCode -ne 0) {
-                if ($events.Count -gt 0) {
-                    break
-                }
-                return New-ErrorEnvelope -ErrorCode $Script:ErrorCodes.InternalError -ErrorMessage "wevtutil qe failed: $($result.StdErr)"
+        $logReset = $RecordId -gt 0 -and $currentMaxId -lt $RecordId
+        $cursor = if ($logReset) { 0L } else { $RecordId }
+        if ($cursor -ge $currentMaxId) {
+            return New-SuccessEnvelope -Data @{last_record_id=$cursor;log_reset=[bool]$logReset;events=@()}
+        }
+        $idClause = '(' + ($idParts -join ' or ') + ')'
+        $xpath = "*[System[$idClause and EventRecordID > $cursor]]"
+        $query = New-Object System.Diagnostics.Eventing.Reader.EventLogQuery($Channel, [System.Diagnostics.Eventing.Reader.PathType]::LogName, $xpath)
+        $reader = New-Object System.Diagnostics.Eventing.Reader.EventLogReader($query)
+        $events = New-Object 'System.Collections.Generic.List[object]'
+        $maxRecordId = $cursor
+        $clock = [Diagnostics.Stopwatch]::StartNew()
+        # One page only. Never drain a growing log inside the single-threaded
+        # HTTP handler. The host schedules subsequent pages cooperatively.
+        while ($events.Count -lt 100 -and $clock.Elapsed.TotalSeconds -lt 5) {
+            try {
+                $remaining = [Math]::Max(0.001, 5 - $clock.Elapsed.TotalSeconds)
+                $record = $reader.ReadEvent([TimeSpan]::FromSeconds($remaining))
+            } catch {
+                # EvtNext can time out after returning a short page. Preserve
+                # that page and its actual cursor; never discard read events
+                # or fabricate an empty batch on a failed initial read.
+                $native = $_.Exception.GetBaseException()
+                if (($native.HResult -band 0xFFFF) -eq 1460 -and $events.Count -gt 0) { break }
+                throw
             }
-
-            $rawXml = if ($result.StdOut) { $result.StdOut.Trim() } else { '' }
-            if ([string]::IsNullOrWhiteSpace($rawXml)) {
-                break
-            }
-
-            $xmlDoc = [xml]"<Events>$rawXml</Events>"
-            $eventNodes = @($xmlDoc.Events.Event)
-            if ($eventNodes.Count -eq 0) {
-                break
-            }
-
-            $batchHighestId = $cursor
-            foreach ($eventNode in $eventNodes) {
-                $rId = [long]$eventNode.System.EventRecordID
-                $eId = [int]$eventNode.System.EventID
-                $timeCreated = [string]$eventNode.System.TimeCreated.SystemTime
-                if ($rId -gt $batchHighestId) {
-                    $batchHighestId = $rId
-                }
-
-                $dataDict = @{}
-                if ($eventNode.EventData) {
-                    $items = @($eventNode.EventData.Data)
-                    foreach ($item in $items) {
-                        if ($item -and $item.Name) {
-                            $val = [string]$item.InnerText
-                            $dataDict[$item.Name] = $val
-                        }
+            if (-not $record) { break }
+            try {
+                $xml = [xml]$record.ToXml()
+                $data = @{}
+                if ($xml.Event.EventData) {
+                    foreach ($item in @($xml.Event.EventData.Data)) {
+                        if ($item.Name) { $data[[string]$item.Name] = [string]$item.InnerText }
                     }
                 }
-
-                $events += @{
-                    record_id    = $rId
-                    event_id     = $eId
-                    time_created = $timeCreated
-                    data         = $dataDict
-                }
-            }
-
-            if ($batchHighestId -gt $maxRecordId) {
-                $maxRecordId = $batchHighestId
-            }
-
-            if ($eventNodes.Count -lt $batchSize -or $batchHighestId -le $cursor) {
-                break
-            }
-            $cursor = $batchHighestId
+                $events.Add(@{record_id=[long]$record.RecordId;event_id=[int]$record.Id;
+                    time_created=$record.TimeCreated.ToUniversalTime().ToString('o');data=$data})
+                $maxRecordId = [long]$record.RecordId
+            } finally { $record.Dispose() }
+            if ($maxRecordId -ge $currentMaxId) { break }
         }
-
-        return New-SuccessEnvelope -Data @{
-            last_record_id = [long]$maxRecordId
-            log_reset      = [bool]$logReset
-            events         = $events
-        }
+        # Advance only over records actually returned. In particular, a reset
+        # must not jump to the latest ID and silently skip later pages.
+        return New-SuccessEnvelope -Data @{last_record_id=$maxRecordId;log_reset=[bool]$logReset;events=@($events.ToArray())}
     } catch {
         return New-ErrorEnvelope -ErrorCode $Script:ErrorCodes.InternalError -ErrorMessage $_.Exception.Message
+    } finally {
+        if ($reader) { $reader.Dispose() }
+        if ($latestReader) { $latestReader.Dispose() }
     }
 }
 

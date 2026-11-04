@@ -1,6 +1,27 @@
 # ADAM repair verification — 2026-11-04
 
-**Overall status: VM acceptance is blocked. The software checks pass; a fully working VM baseline has not been established.**
+**Overall status: verification is in progress. Guest installation is complete, but the real pipeline and snapshot promotion have not passed.**
+
+## Current execution — 2026-11-04, 23:40 host time
+
+This section supersedes the historical installation blockers below. The user completed the Npcap wizard and agent installation. No repeat installer action is currently required.
+
+- Fresh editable installation and dependency consistency passed. After the startup-failure reporting fixes, both the main and fresh environments passed **495 tests with one skipped** (`repo-main-tests.txt`, `repo-fresh-tests.txt`). `repository-final-checks.json` records successful Ruff, dependency, and manifest checks.
+- Ruff passes for `adam`, `frontend`, the candidate/failure acceptance scripts, and the new capture-format/acceptance tests.
+- Running guest build `9162ca3b10c63871` was observed through `/version`. It includes bounded native Sysmon polling, physical-interface resolution, and streamed native output. Final deployed-file and reboot acceptance remains pending.
+- Real functional capture `functional-6699910e` correlated workload activity with live Sysmon, Procmon, and packet evidence on the earlier repaired build. This does not certify the latest build or the complete orchestration pipeline.
+- The first full pipeline attempt failed and retained its evidence in `pipeline-verification.json`. A later functional test timed out; another reached workload completion but failed Sysmon export. These are failures, not successful acceptance runs. A direct export subsequently succeeded in 5.71 seconds for a 65,081,344-byte EVTX, so the intermittent failure remains under investigation.
+- Fresh functional capture `functional-97d6d254` passed on build `9162ca3b10c63871`: process exit 0, live Sysmon event IDs 1/3/11/12/13, 2,437 matching Procmon records, and packet/host-service correlation. All 13 deployed file hashes match the manifest (`deployment-final.json`).
+- After that gate passed, normal shutdown and repair-owned cleanup succeeded. VirtualBox deleted only the failed candidate `d97cdb40-c62d-4b9e-9609-4b822053f2c7` and created replacement candidate `819c969b-aad1-4715-a3e7-fa1b6aeba00c`, named `candidate-20261104-9162ca3b`. The original recovery UUID `b15f95bb-d463-444f-9019-c7dd966a7d90` remains preserved. There are two snapshots; the candidate is not yet accepted or promoted.
+- Two successful independent restore cycles, controlled real-VM failure cases, final CLI/API/dashboard acceptance, and safe consolidation are **not yet verified**.
+- The replacement candidate's first cold restore failed agent readiness (`pipeline-final.json`). VirtualBox recorded lost heartbeat and timing stalls; GuestControl also failed. The runner powered off and restored the candidate after preparation failed. The harness refused promotion and confirmed the unrelated VDI hash unchanged. A controlled initial-clock experiment is underway; its cause and result are not yet established.
+- This real failure exposed an unnecessary 120-second lifecycle drain after preparation failed before consumers started. Cleanup now starts those consumers before draining. A focused regression verifies pending/preparing/failed lifecycle delivery, retention of the original execution error, and no invented drain failure. The readiness error also no longer asserts that the guest OS is reachable based only on failed HTTP checks.
+- Follow-up on November 5: an initial-clock experiment made the guest reachable but left UTC incorrect, so its temporary offset was removed. The guest timezone is now India Standard Time, matching the host's local RTC convention. **Two subsequent cold boots with BIOS offset zero passed** automatic agent startup, build/tool checks, bounded UTC observation, and normal shutdown (`aligned-cold-boots.json`). This establishes repeatable current-state boot health; it does not prove snapshot restoration or the entire pipeline. A corrected candidate must include this guest configuration before restore acceptance resumes.
+- Streamlit AppTest exercised stored failure reporting without application exceptions. Browser visual verification is **not tested**: Codex still reports no connected browsers, despite the user's intent to connect one.
+
+Current evidence root: `logs/repair-verification/20261104-211334/`. The VM is running during these checks. Neither the final powered-off state nor exactly one newly verified `clean` snapshot has been achieved. Old powered-off/single-snapshot statements below describe earlier observations only.
+
+## Historical results
 
 ## Implemented and checked
 

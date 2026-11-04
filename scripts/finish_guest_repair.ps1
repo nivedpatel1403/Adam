@@ -29,7 +29,8 @@ if (-not (Get-Service npcap -ErrorAction SilentlyContinue)) {
 & '.\provision_guest_tools.ps1' -ProcmonSourcePath (Join-Path $PSScriptRoot 'Procmon64.exe') `
     -WiresharkInstallerPath (Join-Path $PSScriptRoot 'Wireshark-4.6.9-x64.exe') `
     -NpcapInstallerPath (Join-Path $PSScriptRoot 'npcap-1.90.exe') `
-    -InstallerManifestPath (Join-Path $PSScriptRoot 'signatures.json')
+    -InstallerManifestPath (Join-Path $PSScriptRoot 'signatures.json') `
+    -SysmonConfigPath (Join-Path $PSScriptRoot 'agent-package\sysmon.xml')
 if ($LASTEXITCODE -and $LASTEXITCODE -ne 0) { throw 'Tool provisioning failed' }
 # Preserve existing authentication and other settings; change only the tool paths.
 $installDir = 'C:\ADAM\agent'

@@ -81,3 +81,11 @@ def test_run_rejects_unknown_arm(monkeypatch, cli_sample):
 
     assert result.exit_code == 2
     assert "invalid --arm" in result.output
+
+
+def test_execution_deadline_reaches_runner(monkeypatch, cli_sample):
+    monkeypatch.setattr(run_module, "Runner", _FakeRunner)
+    monkeypatch.setattr(run_module, "_run_with_graceful_cancellation", asyncio.run)
+    result = CliRunner().invoke(app, ["run", str(cli_sample), "--timeout-seconds", "8"])
+    assert result.exit_code == 0, result.output
+    assert _FakeRunner.last_kwargs["sample_timeout_seconds"] == 8

@@ -333,16 +333,19 @@ def test_network_start_has_dynamic_host_only_adapter_resolution() -> None:
     assert "loopback" in text
 
 
-def test_sysmon_events_since_has_multipage_draining_and_log_reset() -> None:
+def test_sysmon_events_since_has_bounded_native_page_and_log_reset() -> None:
     """
-    In SysmonManager.psm1, Get-SysmonEventsSince implements multi-page draining
-    and handles log resets when current_max_id < requested_record_id.
+    Static contract guard; real VM acceptance additionally exercises full and
+    empty pages. A request must not drain an unbounded growing guest log.
     """
     text = (GUEST_AGENT_DIR / "modules" / "SysmonManager.psm1").read_text(encoding="utf-8")
     assert "$logReset" in text
     assert "$currentMaxId -lt $RecordId" in text
     assert "log_reset" in text
-    assert "$batchSize" in text
+    assert "EventLogReader" in text
+    assert "$events.Count -lt 100" in text
+    assert "$clock.Elapsed.TotalSeconds -lt 5" in text
+    assert "$maxIterations" not in text
     assert "last_record_id" in text
 
 

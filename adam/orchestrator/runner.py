@@ -261,6 +261,7 @@ class Runner:
         headless: bool = True,
         arm: Arm | None = None,
         deception_enabled: bool | None = None,
+        sample_timeout_seconds: int = 300,
     ) -> AnalysisSession:
         """
         Loads (and thereby validates -- fail-fast) Settings, builds the
@@ -271,6 +272,8 @@ class Runner:
         them (Phase 5).
         """
         settings = self._resolve_settings()
+        if sample_timeout_seconds <= 0:
+            raise ValueError("Sample execution timeout must be positive")
         experiment = resolve_experiment(
             settings,
             arm=arm,
@@ -325,6 +328,7 @@ class Runner:
             guest_ready_timeout=settings.sandbox.guest_ready_timeout_s,
             headless=headless,
             guest_channel=guest_channel,
+            detonate_timeout=sample_timeout_seconds,
         )
         if vm_profile:
             controller.vm_profile = vm_profile
@@ -360,7 +364,7 @@ class Runner:
                 deception_enabled=experiment.deception_enabled,
                 policy_ruleset=experiment.policy_ruleset,
                 vm_profile=vm_profile or settings.sandbox.vm_name,
-                timeout_seconds=300,
+                timeout_seconds=sample_timeout_seconds,
                 network_mode=NetworkMode.HOST_ONLY,
             ),
             status=SessionStatus.RUNNING,
@@ -424,6 +428,7 @@ class Runner:
                 session_id=session_id,
                 arm=experiment.arm,
                 deception_enabled=experiment.deception_enabled,
+                sample_timeout_seconds=sample_timeout_seconds,
             )
             session.metrics.raw_events = self._engine_handles.delivered("fusion_raw")
             session.metrics.semantic_events = self._engine_handles.delivered("policy_semantic")

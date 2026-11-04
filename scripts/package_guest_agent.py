@@ -25,6 +25,7 @@ from typing import Any
 AGENT_FILES_REL = [
     "adam_agent.ps1",
     "install.ps1",
+    "sysmon.xml",
 ]
 
 

@@ -105,23 +105,47 @@ app.add_middleware(
 
 @app.get("/api/v1/sessions")
 async def get_sessions():
-    return {"sessions": list(sessions_store.keys())}
+    from adam.api.deps import deps
+    persisted = await deps.session_repo.list_all() if deps.session_repo else []
+    return {"sessions": list(dict.fromkeys([session.session_id for session in persisted] + list(sessions_store)))}
+
+
+async def _session_payload(session_id: str):
+    """Serve durable Runner sessions as well as this process's live sessions."""
+    from adam.api.deps import deps
+    cached = sessions_store.get(session_id, {})
+    metadata = await deps.session_repo.get_by_id(session_id) if deps.session_repo else None
+    if metadata is None:
+        return cached
+    result = {"metadata": metadata}
+    for key, repository, method, identifier in (
+        ("events", deps.event_repo, "get_semantic_by_session", "semantic_id"),
+        ("decisions", deps.decision_repo, "get_by_session", "decision_id"),
+        ("mutations", deps.mutation_repo, "get_by_session", "mutation_id"),
+    ):
+        records = await getattr(repository, method)(session_id) if repository else []
+        merged = {getattr(record, identifier): record.model_dump(mode="json") for record in records}
+        if metadata.status == SessionStatus.RUNNING:
+            for record in cached.get(key, []):
+                merged.setdefault(record[identifier], record)
+        result[key] = list(merged.values())
+    return result
 
 @app.get("/api/v1/sessions/{session_id}")
 async def get_session(session_id: str):
-    return sessions_store.get(session_id, {})
+    return await _session_payload(session_id)
 
 @app.get("/api/v1/sessions/{session_id}/events")
 async def get_session_events(session_id: str):
-    return sessions_store.get(session_id, {}).get("events", [])
+    return (await _session_payload(session_id)).get("events", [])
 
 @app.get("/api/v1/sessions/{session_id}/decisions")
 async def get_session_decisions(session_id: str):
-    return sessions_store.get(session_id, {}).get("decisions", [])
+    return (await _session_payload(session_id)).get("decisions", [])
 
 @app.get("/api/v1/sessions/{session_id}/mutations")
 async def get_session_mutations(session_id: str):
-    return sessions_store.get(session_id, {}).get("mutations", [])
+    return (await _session_payload(session_id)).get("mutations", [])
 
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 

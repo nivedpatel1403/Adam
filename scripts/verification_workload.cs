@@ -21,6 +21,17 @@ class VerificationWorkload {
                 UseShellExecute = false, CreateNoWindow = true
             });
             child.WaitForExit();
+            string c2Url = "http://192.168.19.2:18080/" + marker + "/c2";
+            string responseFile = @"C:\ADAM\" + marker + "_c2_response.txt";
+            string script = "Start-Sleep -Seconds 15; $response = Invoke-WebRequest -UseBasicParsing -Uri '" + c2Url +
+                "' -TimeoutSec 10; $body = if ($response.Content -is [byte[]]) { [Text.Encoding]::UTF8.GetString($response.Content) } else { [string]$response.Content }; [IO.File]::WriteAllText('" + responseFile + "', $body)";
+            var httpChild = Process.Start(new ProcessStartInfo(
+                Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), @"WindowsPowerShell\v1.0\powershell.exe"),
+                "-NoProfile -NonInteractive -Command \"" + script + "\"") {
+                UseShellExecute = false, CreateNoWindow = true
+            });
+            httpChild.WaitForExit();
+            if (httpChild.ExitCode != 0) throw new Exception("Benign HTTP child failed");
             for (int i = 0; i < 3; i++) {
                 var request = (HttpWebRequest)WebRequest.Create("http://192.168.19.2:18080/" + marker);
                 request.Proxy = null;

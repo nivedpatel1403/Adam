@@ -392,28 +392,35 @@ function Invoke-NativeProcess {
         return @{ Pid = $processId; Exited = $false; ExitCode = $null; StdOut = ''; StdErr = ''; TimedOut = $false; Process = $process }
     }
 
-    $stdOutTask = $process.StandardOutput.ReadToEndAsync()
-    $stdErrTask = $process.StandardError.ReadToEndAsync()
-    $exited = $process.WaitForExit($TimeoutMs)
-
-    if (-not $exited) {
-        try { $process.Kill() } catch { }
-        return @{ Pid = $processId; Exited = $false; ExitCode = $null; StdOut = ''; StdErr = ''; TimedOut = $true }
-    }
-
-    $stdOut = $stdOutTask.Result
-    $stdErr = $stdErrTask.Result
-
-    if ($RedirectStandardOutputTo) {
-        # Native replacement for `cmd.exe /c ... > file` -- write the
-        # captured stdout stream directly to disk, no shell redirection
-        # operator anywhere in this path.
-        [System.IO.File]::WriteAllText($RedirectStandardOutputTo, $stdOut)
-    }
-
-    return @{
-        Pid = $processId; Exited = $true; ExitCode = $process.ExitCode
-        StdOut = $stdOut; StdErr = $stdErr; TimedOut = $false
+    $outputFile = $null
+    try {
+        if ($RedirectStandardOutputTo) {
+            # Stream EK JSON to disk. Holding a complete decoded packet export
+            # in memory can exhaust the guest even for a modest pcap.
+            $outputFile = [IO.File]::Open($RedirectStandardOutputTo, [IO.FileMode]::Create, [IO.FileAccess]::Write, [IO.FileShare]::Read)
+            $stdOutTask = $process.StandardOutput.BaseStream.CopyToAsync($outputFile)
+        } else {
+            $stdOutTask = $process.StandardOutput.ReadToEndAsync()
+        }
+        $stdErrTask = $process.StandardError.ReadToEndAsync()
+        $exited = $process.WaitForExit($TimeoutMs)
+        if (-not $exited) {
+            try { $process.Kill(); $process.WaitForExit(2000) | Out-Null } catch { }
+            return @{ Pid = $processId; Exited = $false; ExitCode = $null; StdOut = ''; StdErr = 'Execution deadline exceeded'; TimedOut = $true }
+        }
+        if (-not $stdOutTask.Wait(2000) -or -not $stdErrTask.Wait(2000)) {
+            return @{ Pid = $processId; Exited = $true; ExitCode = $process.ExitCode; StdOut = ''; StdErr = 'Output drain deadline exceeded'; TimedOut = $true }
+        }
+        $stdOut = if ($RedirectStandardOutputTo) { '' } else { $stdOutTask.Result }
+        return @{
+            Pid = $processId; Exited = $true; ExitCode = $process.ExitCode
+            StdOut = $stdOut; StdErr = $stdErrTask.Result; TimedOut = $false
+        }
+    } finally {
+        $process.StandardOutput.Close()
+        $process.StandardError.Close()
+        if ($outputFile) { $outputFile.Dispose() }
+        $process.Dispose()
     }
 }
 

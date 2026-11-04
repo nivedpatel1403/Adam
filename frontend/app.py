@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import os
 import re
@@ -336,15 +337,13 @@ async def execute_live_session(sample_input, profile_name, deception_enabled, st
     if status_container:
         status_container.info("⏳ Restoring VM snapshot, booting, and running live analysis...")
 
-    # Override settings deception arm
-    settings.deception.enable_clock_manipulation = deception_enabled
-
     from adam.orchestrator.runner import Runner
     runner = Runner(settings)
     session = await runner.run(
         host_sample_path,
         vm_profile=profile_name,
         headless=False,
+        deception_enabled=deception_enabled,
     )
     
     return session.session_id, session
@@ -486,7 +485,10 @@ with st.sidebar:
         sidebar_status.info("⏳ Restoring VM snapshot, booting, and running live analysis...")
         try:
             session_id, session = run_async(execute_live_session(sample_to_run, profile_choice, deception_choice, sidebar_status))
-            sidebar_status.success("✅ Detonation complete!")
+            if session.status.value == "COMPLETED":
+                sidebar_status.success("Detonation completed and cleanup passed.")
+            else:
+                sidebar_status.error(f"Session {session.status.value}: {session.error or 'Review the recorded failures.'}")
             st.session_state.last_session_id = session_id
             st.session_state.history_session_selector = session_id
             st.session_state.session_type = "live"
@@ -612,6 +614,21 @@ else:
         arm_val = session.arm.value if hasattr(session.arm, "value") else str(session.arm)
         status_val = session.status.value if hasattr(session.status, "value") else str(session.status)
         net_mode_val = session.config.network_mode.value if hasattr(session.config.network_mode, "value") else str(session.config.network_mode)
+
+        report_data = json.loads(json_report)
+        if status_val in ("FAILED", "PARTIAL"):
+            st.error(session.error or f"Session {status_val.lower()}; review the failures below.")
+        st.markdown("#### Capture source outcomes")
+        st.table([
+            {"Source": outcome["source"], "Status": outcome["status"],
+             "Events": outcome.get("events_count", 0),
+             "Live events": outcome.get("live_events_count", 0),
+             "Errors": "; ".join(outcome.get("errors", []))}
+            for outcome in report_data.get("source_outcomes", {}).values()
+        ], alt="Verified capture outcomes and errors for each telemetry source")
+        if report_data.get("failures"):
+            with st.expander("Session failures", expanded=True):
+                st.table(report_data["failures"], alt="Recorded session and cleanup failures")
 
         # Compute unique ATT&CK coverage
         attck_coverage = []

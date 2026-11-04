@@ -2,6 +2,7 @@
 import shutil
 import subprocess
 import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -26,6 +27,29 @@ if ($failed) { exit 1 }
     # escaped PowerShell string, independent of the working directory.
     command = command.replace("$args[0]", "'" + str(root).replace("'", "''") + "'")
     result = subprocess.run([shell, "-NoProfile", "-Command", command], capture_output=True, text=True, errors="replace", timeout=30)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_native_process_streams_large_output_and_bounds_timeout(tmp_path):
+    shell = shutil.which("powershell") or shutil.which("pwsh")
+    if shell is None:
+        pytest.skip("PowerShell is unavailable")
+    module = Path(__file__).resolve().parents[2] / "adam/sandbox/guest/agent/modules/Common.psm1"
+    command = r"""
+$ErrorActionPreference = 'Stop'
+Import-Module '__MODULE__'
+$capture = Join-Path $PWD 'large.txt'
+$result = Invoke-NativeProcess -FilePath '__PYTHON__' -ArgumentList @('-c', 'import sys; sys.stdout.buffer.write(b"x"*200000); sys.stderr.write("e"*200000)') -TimeoutMs 10000 -RedirectStandardOutputTo $capture
+if ($result.TimedOut -or $result.ExitCode -ne 0) { throw 'Streaming child failed' }
+if ($result.StdOut -ne '' -or $result.StdErr.Length -ne 200000) { throw 'Output was not fully drained' }
+if ([IO.File]::ReadAllText($capture) -ne ('x' * 200000)) { throw 'Streamed file differs from child output' }
+$result = Invoke-NativeProcess -FilePath '__PYTHON__' -ArgumentList @('-c', 'import time; time.sleep(10)') -TimeoutMs 100 -RedirectStandardOutputTo (Join-Path $PWD 'timeout.txt')
+if (-not $result.TimedOut) { throw 'Sleeping child did not time out' }
+if (Get-Process -Id $result.Pid -ErrorAction SilentlyContinue) { throw 'Timed out child survived cleanup' }
+"""
+    command = command.replace("__MODULE__", str(module).replace("'", "''")).replace("__PYTHON__", sys.executable.replace("'", "''"))
+    result = subprocess.run([shell, "-NoProfile", "-Command", command], cwd=tmp_path,
+                            capture_output=True, text=True, errors="replace", timeout=30)
     assert result.returncode == 0, result.stdout + result.stderr
 
 

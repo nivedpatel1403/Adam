@@ -12,6 +12,8 @@ The Procmon executable is `C:\ADAM\Tools\Procmon\Procmon64.exe`.
 
 ## Complete the staged repair
 
+For the current repair execution, the user has already completed the Npcap wizard and installation. Do not rerun the installer solely because older instructions appear below. The remaining work is automated capture, restoration, failure handling, and baseline verification. Consult `repair-verification.md` for current results. The commands below document the earlier installation handoff.
+
 For the latest November 4 follow-up, the corrected bundle is exposed through the temporary read-only `ADAMRepair` share while the VM remains running. The older staged script has a PowerShell 5.1 manifest parsing bug. Use administrator PowerShell inside the guest:
 
 ```powershell

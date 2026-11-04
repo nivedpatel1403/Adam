@@ -82,7 +82,7 @@ class SysmonCollector(BaseCollector):
         _run()) specifically so tests can override just the I/O boundary --
         see module docstring.
         """
-        return iter_evtx_records(self._evtx_path)
+        return iter_evtx_records(self._evtx_path, min_record_id=self._last_record_id)
 
     def _record_id_of(self, xml_text: str) -> int | None:
         """
@@ -113,7 +113,7 @@ class SysmonCollector(BaseCollector):
                 return
 
             try:
-                records = list(self._read_current_records())
+                records = self._read_current_records()
             except OSError as exc:
                 self.errors.append(str(exc))
                 logger.warning("source=%s cannot read %s: %s", self.source_name, self._evtx_path, exc)
@@ -122,7 +122,11 @@ class SysmonCollector(BaseCollector):
 
             highest_seen = self._last_record_id
             emitted_since_yield = 0
-            for xml_text in records:
+            for index, xml_text in enumerate(records):
+                if index % 100 == 0:
+                    await asyncio.sleep(0)
+                    if self._stop_requested():
+                        return
                 record_id = self._record_id_of(xml_text)
                 if record_id is not None and self._last_record_id is not None and record_id <= self._last_record_id:
                     continue  # already emitted in a previous poll

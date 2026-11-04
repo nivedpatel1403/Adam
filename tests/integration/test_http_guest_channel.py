@@ -91,6 +91,7 @@ class FakeGuestAgentServer:
             return _envelope({"interfaces": [{"index": "1", "description": "Ethernet"}]})
 
         if method == "POST" and path == "/network/start":
+            self.files[body["pcap_path"]] = b"FAKE-PCAP"
             return _envelope({"pid": 4243})
 
         if method == "POST" and path in ("/procmon/stop", "/network/stop"):
@@ -207,6 +208,78 @@ async def test_full_capture_export_fetch_round_trip() -> None:
         assert artifacts.network_ek_json_path is not None
         assert Path(artifacts.procmon_csv_path).read_bytes() == b"Date & Time,Process Name\n1/1/2026,test.exe\n"
         assert b"index" in Path(artifacts.network_ek_json_path).read_bytes()
+        assert (Path(tmp) / "network.pcapng").read_bytes() == b"FAKE-PCAP"
+        first_export = fake.calls.index(("POST", "/sysmon/export"))
+        assert fake.calls.index(("POST", "/network/stop")) < first_export
+        assert fake.calls.index(("POST", "/procmon/stop")) < first_export
+        assert fake.calls.index(("POST", "/network/start")) < fake.calls.index(("POST", "/procmon/start"))
+
+
+async def test_lost_start_response_still_stops_session_owned_capture(tmp_path):
+    fake = FakeGuestAgentServer()
+    channel = _make_channel(fake)
+    original = channel._request
+    async def lost_response(method, path, **kwargs):
+        result = await original(method, path, **kwargs)
+        return None if path == "/network/start" else result
+    channel._request = lost_response
+    started = await channel.start_captures("lost_start")
+    assert started["network"] is False
+    artifacts = await channel.stop_export_and_fetch("lost_start", tmp_path)
+    assert ("POST", "/network/stop") in fake.calls
+    assert artifacts.network_ek_json_path is None
+
+
+async def test_default_procmon_export_is_normalized_with_guest_capture_context(tmp_path):
+    fake = FakeGuestAgentServer()
+    original = fake.handler
+    def handler(request):
+        if request.url.path == "/process/start":
+            return _envelope({"pid": 77, "exit_code": 0, "stdout": json.dumps({
+                "started_at": "2026-11-04T08:00:00-08:00", "ended_at": "2026-11-04T08:01:00-08:00"})})
+        response = original(request)
+        if request.url.path == "/procmon/export":
+            target = json.loads(request.content)["csv_path"]
+            fake.files[target] = b'Time of Day,Process Name,PID,Operation,Path,Result,Detail\n08:00:30.1234567,verify.exe,123,CreateFile,C:\\ADAM\\marker,SUCCESS,\n'
+        return response
+    fake.handler = handler
+    channel = _make_channel(fake)
+    await channel.start_captures("time_context")
+    artifacts = await channel.stop_export_and_fetch("time_context", tmp_path)
+    assert artifacts.procmon_csv_path
+    assert '2026-11-04T16:00:30.123456+00:00' in Path(artifacts.procmon_csv_path).read_text()
+    assert 'Time of Day' in (tmp_path / 'procmon.raw.csv').read_text()
+
+
+async def test_failed_capture_stop_cannot_produce_successful_export(tmp_path) -> None:
+    fake = FakeGuestAgentServer()
+    original = fake.handler
+    def handler(request):
+        if request.url.path == "/network/stop":
+            return _envelope({"stopped": False})
+        return original(request)
+    fake.handler = handler
+    channel = _make_channel(fake)
+    await channel.start_captures("stop_failure")
+    artifacts = await channel.stop_export_and_fetch("stop_failure", tmp_path)
+    assert artifacts.network_ek_json_path is None
+    assert ("POST", "/network/convert") not in fake.calls
+    assert artifacts.procmon_csv_path is not None
+
+
+async def test_export_transport_deadlines_cover_guest_conversion_limits(tmp_path) -> None:
+    fake = FakeGuestAgentServer()
+    original = fake.handler
+    deadlines = {}
+    def handler(request):
+        deadlines[request.url.path] = request.extensions["timeout"]["read"]
+        return original(request)
+    fake.handler = handler
+    channel = _make_channel(fake)
+    await channel.start_captures("deadlines")
+    await channel.stop_export_and_fetch("deadlines", tmp_path)
+    assert deadlines["/procmon/export"] >= 135
+    assert deadlines["/network/convert"] >= 75
 
 
 async def test_sysmon_access_denied_yields_none_not_raise() -> None:
@@ -435,9 +508,9 @@ async def test_wait_until_ready_timeout_raises_guest_timeout_error() -> None:
         await channel.wait_until_ready()
     message = str(excinfo.value)
     assert "did not become healthy" in message
-    # Must distinguish "guest HTTP agent never came up" from a VM boot
-    # failure -- per the requirement this was built against.
-    assert "not a VM boot failure" in message
+    # A refused HTTP connection does not establish guest OS health.
+    assert "cannot distinguish a stalled guest" in message
+    assert "already confirmed reachable" not in message
 
 
 async def test_wait_until_ready_success_true_required_not_just_http_200() -> None:

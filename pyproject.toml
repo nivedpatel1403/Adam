@@ -43,7 +43,7 @@ adam = "adam.cli.main:app"
 include = ["adam*"]
 
 [tool.setuptools.package-data]
-adam = ["dashboard/templates/*.html", "sandbox/guest/agent/*.ps1", "sandbox/guest/agent/*.json", "sandbox/guest/agent/modules/*.psm1"]
+adam = ["dashboard/templates/*.html", "sandbox/guest/agent/*.ps1", "sandbox/guest/agent/*.json", "sandbox/guest/agent/*.xml", "sandbox/guest/agent/modules/*.psm1"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

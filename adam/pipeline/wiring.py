@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -100,6 +101,14 @@ def _network_endpoint(payloads: list[dict[str, Any]]) -> str | None:
         # can supply the endpoint directly.
         if payload.get("network_endpoint"):
             return str(payload["network_endpoint"])
+    # A process command line can expose a full observed HTTP endpoint before
+    # packet export. Preserve it instead of inventing a scheme for a socket.
+    for payload in payloads:
+        command = str(payload.get("CommandLine") or payload.get("command_line") or "")
+        match = re.search(r"https?://[^\s\"'<>;)]+", command)
+        if match:
+            return match.group(0)
+    for payload in payloads:
         # Sysmon keys and the synthetic/replay generator's lowercase keys
         # are both observed telemetry, not fabricated defaults.
         destination_ip = payload.get("DestinationIp") or payload.get("dest_ip")

@@ -173,6 +173,8 @@ def run(
         "--deception/--no-deception",
         help="Override deception enablement for this run (control/treatment is derived from it).",
     ),
+    timeout_seconds: int = typer.Option(300, "--timeout-seconds", min=1,
+        help="Maximum workload execution time in seconds; timeout fails the session."),
 ) -> None:
     """Run one full, unattended analysis session against SAMPLE_PATH."""
     if verbose:
@@ -221,6 +223,7 @@ def run(
             headless=not gui,
             arm=requested_arm,
             deception_enabled=deception,
+            sample_timeout_seconds=timeout_seconds,
         )
         session = _run_with_graceful_cancellation(coro)
     except ValidationError as exc:

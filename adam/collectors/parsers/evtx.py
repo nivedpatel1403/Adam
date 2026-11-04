@@ -258,7 +258,7 @@ def parse_sysmon_event_xml(
     )
 
 
-def iter_evtx_records(evtx_path: str) -> Iterator[str]:
+def iter_evtx_records(evtx_path: str, *, min_record_id: int | None = None) -> Iterator[str]:
     """
     Yields the raw XML string of each record in a real Sysmon .evtx file, in
     file order. Thin wrapper around python-evtx -- see module docstring for
@@ -271,8 +271,11 @@ def iter_evtx_records(evtx_path: str) -> Iterator[str]:
     # untyped-third-party-library situation, not a shortcut around our own
     # code's typing.
     import Evtx.Evtx as evtx  # type: ignore[import-untyped]
-    import Evtx.Views as e_views  # type: ignore[import-untyped]
 
     with evtx.Evtx(evtx_path) as log:
-        for xml_str, _record in e_views.evtx_file_xml_view(log.get_file_header()):
-            yield xml_str
+        for record in log.records():
+            # EVTX record headers carry the same EventRecordID as the XML.
+            # Skip historical records before expensive XML rendering.
+            if min_record_id is not None and record.record_num() <= min_record_id:
+                continue
+            yield record.xml()

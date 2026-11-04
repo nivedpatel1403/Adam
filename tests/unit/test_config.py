@@ -51,7 +51,7 @@ class TestHttpGuestSettings:
         assert settings.procmon_path is None
         assert settings.tshark_path is None
         assert settings.sysmon_log == "Microsoft-Windows-Sysmon/Operational"
-        assert settings.tshark_interface == "1"
+        assert settings.tshark_interface == "auto"
         assert settings.capture_dir == "C:\\ADAM\\telemetry"
 
     def test_base_url_property(self) -> None:

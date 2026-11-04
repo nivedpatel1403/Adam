@@ -9,6 +9,7 @@ param(
     [string]$WiresharkInstallerPath,
     [string]$NpcapInstallerPath,
     [string]$InstallerManifestPath,
+    [string]$SysmonConfigPath,
     [switch]$NpcapOem,
     [switch]$SkipSysmonCheck
 )
@@ -66,5 +67,12 @@ $interfaces | Write-Output
 if (-not $SkipSysmonCheck) {
     $sysmon = Get-Service -Name Sysmon,Sysmon64 -ErrorAction SilentlyContinue | Select-Object -First 1
     if (-not $sysmon -or $sysmon.Status -ne 'Running') { throw 'Sysmon is not running' }
+    if (-not $SysmonConfigPath -or -not (Test-Path -LiteralPath $SysmonConfigPath -PathType Leaf)) {
+        throw 'Provide -SysmonConfigPath with the packaged sysmon.xml; a running service alone does not establish event coverage'
+    }
+    $sysmonExe = Join-Path $env:WINDIR ($sysmon.Name + '.exe')
+    if (-not (Test-Path -LiteralPath $sysmonExe)) { throw "Sysmon executable missing: $sysmonExe" }
+    & $sysmonExe -c $SysmonConfigPath
+    if ($LASTEXITCODE -ne 0) { throw 'Sysmon rejected the telemetry configuration' }
 }
 Write-Output 'Tool checks passed. Real capture and restore verification are still required before promotion.'

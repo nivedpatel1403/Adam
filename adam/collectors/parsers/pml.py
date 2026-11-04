@@ -18,15 +18,11 @@ specifies -- the export-to-CSV step is assumed to already have happened
 this module runs, same division of labour as `evtx.py` assumes Sysmon has
 already written its EVTX log.
 
-Required export configuration. ProcMon's CSV export is column-configurable,
-and its default "Time of Day" column carries no date, which cannot produce
-a full `occurred_at` timestamp on its own. This parser therefore requires
-the CSV to include a **"Date & Time"** column (ProcMon: Options > Select
-Columns > Date & Time) instead, formatted in ProcMon's standard US-locale
-style, e.g. `7/21/2026 2:32:11.4012207 PM` -- the only date/time format
-this parser has been verified against. A non-US-locale ProcMon install
-producing a different date/number format is a disclosed limitation, not
-silently handled.
+Procmon's default "Time of Day" export carries no date. The HTTP collector
+preserves the raw CSV and normalizes those values using the guest's actual
+PML creation and export timestamps, including the guest UTC offset. Missing
+or ambiguous capture context fails ingestion. Row parsing accepts normalized
+timezone-aware ISO timestamps and the legacy US-locale "Date & Time" format.
 
 Field-completeness note, same convention as evtx.py: ProcMon's default CSV
 columns do not include a parent PID, full image path (only the bare
@@ -43,7 +39,9 @@ from __future__ import annotations
 import csv
 import io
 import re
-from datetime import UTC, datetime
+import shutil
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 from adam.contracts.enums import Category, Source
 from adam.contracts.raw_event import ProcessInfo, RawEvent
@@ -103,6 +101,14 @@ def _parse_datetime(raw: str) -> datetime:
     column (not the default "Time of Day") is required, and for the
     US-locale-only limitation.
     """
+    if "T" in raw:
+        try:
+            value = datetime.fromisoformat(raw.strip())
+            if value.tzinfo is None:
+                raise ValueError("ISO timestamp lacks timezone")
+            return value.astimezone(UTC)
+        except ValueError as exc:
+            raise ProcmonParseError(f"Invalid normalized timestamp: {raw!r}") from exc
     match = _DATETIME_RE.match(raw.strip())
     if match is None:
         raise ProcmonParseError(f"unrecognised ProcMon 'Date & Time' format: {raw!r}")
@@ -131,6 +137,51 @@ def _parse_datetime(raw: str) -> datetime:
         )
     except ValueError as exc:
         raise ProcmonParseError(f"invalid ProcMon 'Date & Time' value: {raw!r} ({exc})") from exc
+
+
+def requires_time_context(path: str | Path) -> bool:
+    with Path(path).open(encoding="utf-8-sig", newline="") as stream:
+        header = next(csv.reader(stream), [])
+    return "Time of Day" in header and "Date & Time" not in header
+
+
+def normalize_procmon_csv(source: Path, destination: Path, *, started_at: str, ended_at: str) -> None:
+    """Resolve time-only rows using the guest's PML creation/export interval.
+
+    Never infer a date or timezone from the host clock. Keep the raw export
+    separately so every normalized timestamp can be independently reproduced.
+    """
+    start = datetime.fromisoformat(started_at)
+    end = datetime.fromisoformat(ended_at)
+    if start.tzinfo is None or end.tzinfo is None or start.utcoffset() != end.utcoffset():
+        raise ProcmonParseError("Missing or changed guest capture timezone")
+    if end < start or end - start >= timedelta(days=1):
+        raise ProcmonParseError("Capture interval cannot unambiguously resolve time-of-day rows")
+    with source.open(encoding="utf-8-sig", newline="") as incoming:
+        reader = csv.DictReader(incoming)
+        fields = list(reader.fieldnames or [])
+        if "Date & Time" in fields:
+            shutil.copyfile(source, destination)
+            return
+        if "Time of Day" not in fields:
+            raise ProcmonParseError("Procmon export has no time column")
+        fields[fields.index("Time of Day")] = "Date & Time"
+        with destination.open("w", encoding="utf-8", newline="") as outgoing:
+            writer = csv.DictWriter(outgoing, fieldnames=fields)
+            writer.writeheader()
+            for row in reader:
+                raw_time = row.pop("Time of Day")
+                candidates = []
+                for day_offset in (-1, 0, 1):
+                    date = start.date() + timedelta(days=day_offset)
+                    parsed = _parse_datetime(f"{date.month}/{date.day}/{date.year} {raw_time}")
+                    local = parsed.replace(tzinfo=start.tzinfo)
+                    if start - timedelta(seconds=10) <= local <= end + timedelta(seconds=10):
+                        candidates.append(local)
+                if len(candidates) != 1:
+                    raise ProcmonParseError(f"Time-of-day row lies outside capture interval: {raw_time}")
+                row["Date & Time"] = candidates[0].astimezone(UTC).isoformat()
+                writer.writerow(row)
 
 
 def parse_procmon_csv_row(

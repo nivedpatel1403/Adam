@@ -1,0 +1,12 @@
+<!-- ADAM lab telemetry. Empty exclude filters enable all events of these types.
+     https://learn.microsoft.com/en-us/sysinternals/downloads/sysmon -->
+<Sysmon schemaversion="4.90">
+  <HashAlgorithms>SHA256</HashAlgorithms>
+  <EventFiltering>
+    <ProcessCreate onmatch="exclude" />
+    <NetworkConnect onmatch="exclude" />
+    <FileCreate onmatch="exclude" />
+    <RegistryEvent onmatch="exclude" />
+    <DnsQuery onmatch="exclude" />
+  </EventFiltering>
+</Sysmon>

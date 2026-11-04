@@ -79,7 +79,7 @@ auth_token = ""
 procmon_path  = "C:\\ADAM\\Tools\\Procmon\\Procmon64.exe"
 tshark_path   = "C:\\Program Files\\Wireshark\\tshark.exe"
 sysmon_log    = "Microsoft-Windows-Sysmon/Operational"
-tshark_interface = "1"
+tshark_interface = "auto"
 capture_dir   = "C:\\ADAM\\telemetry"
 # false: log missing tools and continue. true: fail before the VM is armed
 # and before any sample executes. See docs/guest-provisioning-guide.md.

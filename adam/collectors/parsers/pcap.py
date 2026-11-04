@@ -55,7 +55,22 @@ class PcapParseError(Exception):
 
 def _layer(layers: dict[str, Any], layer_name: str) -> dict[str, str]:
     value = layers.get(layer_name)
-    return value if isinstance(value, dict) else {}
+    if not isinstance(value, dict):
+        return {}
+    # Real `-T ek` uses prefixed underscore keys; `-T json` and older
+    # fixtures use dotted field names. Preserve both without guessing fields.
+    normalized = dict(value)
+    fields = {
+        "frame": ("frame.number", "frame.time_epoch", "frame.protocols", "frame.len"),
+        "ip": ("ip.src", "ip.dst"), "ipv6": ("ipv6.src", "ipv6.dst"),
+        "tcp": ("tcp.srcport", "tcp.dstport"), "udp": ("udp.srcport", "udp.dstport"),
+        "http": ("http.request.full_uri", "http.host", "http.request.uri"),
+    }
+    for field in fields.get(layer_name, ()):
+        encoded = f"{layer_name}_{field.replace('.', '_')}"
+        if field not in normalized and encoded in value:
+            normalized[field] = value[encoded]
+    return normalized
 
 
 def parse_tshark_ek_line(

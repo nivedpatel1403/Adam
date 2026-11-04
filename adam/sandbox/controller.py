@@ -64,6 +64,7 @@ from adam.contracts.interfaces import MutationRequest, MutationResult
 from adam.contracts.session import SampleRef
 from adam.sandbox.guest.channel import GuestChannel
 from adam.sandbox.guest.http_models import GuestAgentError, GuestAgentUnreachableError
+from adam.sandbox.shutdown import shutdown_normally
 from adam.sandbox.state import SandboxOperationError, SandboxState, SandboxStateError
 from adam.sandbox.vbox.client import VBoxCommandError, VirtualBoxClient
 from adam.sandbox.vbox.models import VMOperationResult
@@ -347,6 +348,8 @@ class SandboxController:
                 target_pid = getattr(start_res, "pid", None)
                 if target_pid is None:
                     raise RuntimeError("Guest did not return an owned process PID")
+                self._last_detonation_result = start_res
+                self._last_detonated_sample = sample
                 logger.info("session sample started on guest with PID=%s (detached)", target_pid)
                 result = start_res
 
@@ -441,11 +444,7 @@ class SandboxController:
         try:
             state = await self._client.get_state(self._vm_name)
             if state in ("running", "paused", "stuck"):
-                result = await self._client.stop(self._vm_name, mode="acpi")
-                if not result.success:
-                    raise RuntimeError(result.stderr)
-                result = await self._client.wait_for_state(self._vm_name, "poweroff", timeout=90)
-                if not result.success:
+                if not await shutdown_normally(self._client, self._vm_name, channel=self._guest_channel):
                     raise RuntimeError("Guest did not shut down cleanly within 90 seconds")
             elif state == "saved":
                 result = await self._client.discard_saved_state(self._vm_name)

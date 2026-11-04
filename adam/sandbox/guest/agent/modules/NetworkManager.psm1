@@ -29,47 +29,23 @@ $Script:RunningCaptures = @{}
 
 function Resolve-HostOnlyInterfaceIndex {
     param([Parameter(Mandatory = $true)][string]$TsharkPath)
-
-    if (-not (Test-Path -LiteralPath $TsharkPath)) { return $null }
     try {
-        $result = Invoke-NativeProcess -FilePath $TsharkPath -ArgumentList @('-D') -TimeoutMs 15000
-        if ($result.TimedOut -or [string]::IsNullOrWhiteSpace($result.StdOut)) { return $null }
-
-        $lines = $result.StdOut -split "`r?`n"
-        $interfaces = @()
-        foreach ($line in $lines) {
-            if ($line -match '^(\d+)\.\s+(.*)$') {
-                $interfaces += @{ index = $Matches[1]; description = $Matches[2] }
-            }
-        }
-        if ($interfaces.Count -eq 0) { return $null }
-
-        # Check for network adapter on 192.168.19.*
-        $hostOnlyAlias = $null
-        try {
-            $ipObj = Get-NetIPAddress -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress -like '192.168.19.*' } | Select-Object -First 1
-            if ($ipObj) {
-                $hostOnlyAlias = $ipObj.InterfaceAlias
-                $adapter = Get-NetAdapter -InterfaceIndex $ipObj.InterfaceIndex -ErrorAction Stop
-                $guid = $adapter.InterfaceGuid.ToString().Trim('{}')
-                foreach ($iface in $interfaces) {
-                    if ($iface.description -match [regex]::Escape($guid)) { return $iface.index }
-                }
-            }
-        } catch { }
-
-        if ($hostOnlyAlias) {
-            foreach ($iface in $interfaces) {
-                if ($iface.description -like "*$hostOnlyAlias*" -or $iface.description -match [regex]::Escape($hostOnlyAlias)) {
-                    return $iface.index
+        $listed = Get-NetworkInterfaces -TsharkPath $TsharkPath
+        if (-not $listed.success) { return $null }
+        foreach ($nic in [Net.NetworkInformation.NetworkInterface]::GetAllNetworkInterfaces()) {
+            if ($nic.OperationalStatus -ne [Net.NetworkInformation.OperationalStatus]::Up) { continue }
+            $hostOnly = @($nic.GetIPProperties().UnicastAddresses | Where-Object { $_.Address.ToString().StartsWith('192.168.19.') })
+            if ($hostOnly.Count -eq 0) { continue }
+            $InterfaceGuid = $nic.Id.Trim('{}')
+            foreach ($iface in $listed.data.interfaces) {
+                if ($iface.description -match [regex]::Escape($InterfaceGuid)) {
+                    $device = [regex]::Match($iface.description, '\\Device\\NPF_\{[0-9A-Fa-f-]+\}')
+                    if ($device.Success) { return $device.Value }
                 }
             }
         }
-
-        return $null
-    } catch {
-        return $null
-    }
+    } catch { }
+    return $null
 }
 
 function Get-NetworkInterfaces {
@@ -78,10 +54,13 @@ function Get-NetworkInterfaces {
         return New-ErrorEnvelope -ErrorCode $Script:ErrorCodes.ToolUnavailable -ErrorMessage "tshark not found at $TsharkPath"
     }
     try {
-        $result = Invoke-NativeProcess -FilePath $TsharkPath -ArgumentList @('-D') -TimeoutMs 15000
+        $dumpcap = Join-Path (Split-Path -Parent $TsharkPath) 'dumpcap.exe'
+        if (-not (Test-Path -LiteralPath $dumpcap)) { return New-ErrorEnvelope -ErrorCode $Script:ErrorCodes.ToolUnavailable -ErrorMessage 'dumpcap capture component is missing' }
+        $result = Invoke-NativeProcess -FilePath $dumpcap -ArgumentList @('-D') -TimeoutMs 15000
         if ($result.TimedOut) {
-            return New-ErrorEnvelope -ErrorCode $Script:ErrorCodes.Timeout -ErrorMessage "tshark -D did not complete in time"
+            return New-ErrorEnvelope -ErrorCode $Script:ErrorCodes.Timeout -ErrorMessage "dumpcap -D did not complete in time"
         }
+        if ($result.ExitCode -ne 0) { return New-ErrorEnvelope -ErrorCode $Script:ErrorCodes.ToolUnavailable -ErrorMessage $result.StdErr }
         $interfaces = @()
         foreach ($line in ($result.StdOut -split "`r?`n")) {
             if ($line -match '^(\d+)\.\s+(.*)$') {

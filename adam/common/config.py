@@ -179,7 +179,7 @@ class HttpGuestSettings(BaseModel):
     procmon_path: str | None = None
     tshark_path: str | None = None
     sysmon_log: str = "Microsoft-Windows-Sysmon/Operational"
-    tshark_interface: str = "1"
+    tshark_interface: str = "auto"
     capture_dir: str = "C:\\ADAM\\telemetry"
     tools_required: bool = False
 
