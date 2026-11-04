@@ -12,6 +12,14 @@ The Procmon executable is `C:\ADAM\Tools\Procmon\Procmon64.exe`.
 
 ## Complete the staged repair
 
+For the latest November 4 follow-up, the corrected bundle is exposed through the temporary read-only `ADAMRepair` share while the VM remains running. The older staged script has a PowerShell 5.1 manifest parsing bug. Use administrator PowerShell inside the guest:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File '\\VBOXSVR\ADAMRepair\complete_repair.ps1'
+```
+
+This verifies and copies the corrected bundle into `C:\ADAM\repair` before running it. Inspect any existing installer before starting another: the previous HTTP installation request lost its response and its outcome is unknown. Complete the Npcap wizard when prompted. The transient share disappears when the VM stops; the host can recreate it from `logs/repair-verification/20261104-172228/handoff`. Remove the share before creating the candidate snapshot.
+
 The November 4 repair bundle is staged at `C:\ADAM\repair`. Start the VM in its current state, without restoring the old recovery snapshot. Log in and open an administrator PowerShell. Run:
 
 ```powershell

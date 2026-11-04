@@ -18,7 +18,7 @@ function Assert-StagedInstaller([string]$Path) {
         throw "Host-staged installer is missing: $Path"
     }
     if ($InstallerManifestPath) {
-        $manifest = @(Get-Content -LiteralPath $InstallerManifestPath -Raw | ConvertFrom-Json)
+        $manifest = Get-Content -LiteralPath $InstallerManifestPath -Raw | ConvertFrom-Json
         $fileName = [IO.Path]::GetFileName($Path)
         $entry = @($manifest | Where-Object { $_.File -eq $fileName })
         if ($entry.Count -ne 1 -or $entry[0].Status -ne 'Valid' -or

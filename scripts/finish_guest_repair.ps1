@@ -6,7 +6,7 @@ This script does not create, rename, restore, or delete VM snapshots. #>
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 Set-Location -LiteralPath $PSScriptRoot
-$manifest = @(Get-Content -LiteralPath '.\signatures.json' -Raw | ConvertFrom-Json)
+$manifest = Get-Content -LiteralPath '.\signatures.json' -Raw | ConvertFrom-Json
 foreach ($entry in $manifest) {
     if ($entry.Status -ne 'Valid' -or (Get-FileHash -LiteralPath $entry.File -Algorithm SHA256).Hash -ne $entry.SHA256) {
         throw "Staged installer failed integrity verification: $($entry.File)"

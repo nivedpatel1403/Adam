@@ -536,13 +536,13 @@ $filtered = @($lines | Where-Object {{ -not ($_.Contains($hostname) -and $_.Cont
                     backoff = self._retry_backoff_s * (2 ** (attempt - 1))
                     logger.warning(
                         "guest_http: %s transient transport error on attempt %d/%d, retrying in %.2fs: %s",
-                        label or path, attempt, self._retry_attempts, backoff, exc,
+                        label or path, attempt, attempts, backoff, exc,
                     )
                     await asyncio.sleep(backoff)
                     continue
                 logger.warning(
                     "guest_http: %s failed after %d attempt(s) (transport error): %s",
-                    label or path, self._retry_attempts, exc,
+                    label or path, attempts, exc,
                 )
                 raise
 
