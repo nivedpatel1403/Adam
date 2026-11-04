@@ -147,7 +147,7 @@ class SysmonCollector(BaseCollector):
                         and event.source_event_id <= self._last_record_id
                     ):
                         continue
-                    self._emit(event)
+                    await self._emit_wait(event)
                     emitted_since_yield += 1
                     if emitted_since_yield >= 10:
                         await asyncio.sleep(0)  # cooperative yield point to let pump tasks run

@@ -173,6 +173,9 @@ class ReportGenerator(IReportGenerator):
             if outcome is None:
                 source_outcomes[label] = {"source": label, "status": "UNVERIFIED", "events_count": source_counts[label]}
                 continue
+            # ADR-005 stores new raw events in JSONL, not the legacy raw
+            # SQLite table. Lifecycle counts reflect the durable writer.
+            source_counts[label] = outcome.events_count
             status = "FAILED" if outcome.errors else (
                 "CAPTURED" if outcome.verified and outcome.capture_started and outcome.exported and outcome.parsed and outcome.events_count else
                 "EMPTY" if outcome.verified and outcome.capture_started and outcome.exported and outcome.parsed else "UNVERIFIED"
@@ -214,7 +217,7 @@ class ReportGenerator(IReportGenerator):
             "decisions": decision_items,
             "detection_risk": high_risk_mutations,
             "metrics": {
-                "raw_events_count": len(raw_events),
+                "raw_events_count": max(session.metrics.raw_events, len(raw_events)),
                 "events_count": len(events),
                 "mutations_count": len(mutations),
                 "decisions_count": len(decisions),

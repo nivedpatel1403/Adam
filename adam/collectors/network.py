@@ -80,6 +80,8 @@ class NetworkCollector(BaseCollector):
                 complete_lines = [line for line in lines[:-1] if line.strip()]
 
                 for line in complete_lines:
+                    if self._stop_requested():
+                        return
                     try:
                         event = parse_tshark_ek_line(
                             line, session_id=self._session_id, raw_ref=self._ek_json_path
@@ -90,7 +92,7 @@ class NetworkCollector(BaseCollector):
                         continue
 
                     if event is not None:
-                        self._emit(event)
+                        await self._emit_wait(event)
                         await asyncio.sleep(0)
 
             self.read_complete.set()

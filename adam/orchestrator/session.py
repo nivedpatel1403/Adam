@@ -251,6 +251,7 @@ class SessionOrchestrator:
         post_detonation_drain_seconds: float = 0.5,
         guest_agent: GuestChannel | None = None,
         live_poll_enabled: bool = True,
+        export_ingest_timeout_s: float = 120.0,
     ) -> None:
         self._controller = controller
         self._bus = bus
@@ -259,6 +260,9 @@ class SessionOrchestrator:
         self._guest_target_path_template = guest_target_path_template
         self._bus_drain_timeout = bus_drain_timeout
         self._post_detonation_drain_seconds = post_detonation_drain_seconds
+        if export_ingest_timeout_s <= 0:
+            raise ValueError("export_ingest_timeout_s must be positive")
+        self._export_ingest_timeout_s = export_ingest_timeout_s
         # Phase 5 addition. None (the default) preserves this class's
         # pre-Phase-5 behavior exactly -- see module docstring's
         # "Guest-telemetry-source gap -- RESOLVED" note.
@@ -301,43 +305,69 @@ class SessionOrchestrator:
 
         Returns True if accepted and published, False if dropped as duplicate.
         """
-        if self._session_id is not None and event.session_id != self._session_id:
-            raise ValueError(
-                f"session ownership validation failed: event session_id {event.session_id!r} "
-                f"does not match orchestrator session_id {self._session_id!r}"
-            )
-        if self._session_id is None:
-            self._session_id = event.session_id
+        return bool(await self.ingest_raw_batch([event], writer, channel=channel, generation=generation))
 
-        dedup_key = (event.session_id, channel, generation, event.source_event_id)
-        async def commit() -> bool:
+    async def ingest_raw_batch(
+        self, events: list[RawEvent], writer: RawEventWriter,
+        channel: str = "sysmon", generation: int = 0,
+    ) -> int:
+        """Persist and publish a bounded batch under the shared ingestion lock."""
+        for event in events:
+            if self._session_id is not None and event.session_id != self._session_id:
+                raise ValueError(
+                    f"session ownership validation failed: event session_id {event.session_id!r} "
+                    f"does not match orchestrator session_id {self._session_id!r}"
+                )
+            if self._session_id is None:
+                self._session_id = event.session_id
+        if len(events) > 128:
+            accepted = 0
+            for offset in range(0, len(events), 128):
+                accepted += await self.ingest_raw_batch(events[offset:offset+128], writer, channel, generation)
+            return accepted
+
+        async def commit() -> int:
             async with self._ingest_lock:
-                if dedup_key in self._published_event_keys:
-                    return False
-                if dedup_key not in self._seen_event_keys:
-                    try:
-                        await writer.write(event)
-                    except Exception as exc:
-                        self._record_failure(channel, exc)
-                        logger.exception("Raw event persistence failed")
-                        raise
-                    self._seen_event_keys.add(dedup_key)
+                pending = {}
+                for event in events:
+                    key = (event.session_id, channel, generation, event.source_event_id)
+                    if key not in self._published_event_keys:
+                        pending.setdefault(key, event)
+                fresh = [(key, event) for key, event in pending.items() if key not in self._seen_event_keys]
+
+                def persisted(key) -> None:
+                    self._seen_event_keys.add(key)
                     outcome = self._source_outcomes.get(channel)
                     if outcome is not None:
                         outcome.events_count += 1
-                envelope: Envelope[RawEvent] = Envelope(
-                    message_id=f"msg_{uuid.uuid4().hex}", message_type="RawEvent",
-                    session_id=event.session_id, correlation_id=event.event_id,
-                    emitted_at=datetime.now(UTC), emitter=f"collector.{channel}", payload=event,
-                )
+
                 try:
-                    await self._bus.publish(envelope)
+                    if len(fresh) > 1 and callable(getattr(writer, "write_batch", None)):
+                        await writer.write_batch([event for _, event in fresh])
+                        for key, _ in fresh:
+                            persisted(key)
+                    else:
+                        for key, event in fresh:
+                            await writer.write(event)
+                            persisted(key)
                 except Exception as exc:
-                    self._record_failure("publish", exc)
-                    logger.exception("Durable raw event could not be published")
+                    self._record_failure(channel, exc)
+                    logger.exception("Raw event persistence failed")
                     raise
-                self._published_event_keys.add(dedup_key)
-                return True
+                for key, event in pending.items():
+                    envelope: Envelope[RawEvent] = Envelope(
+                        message_id=f"msg_{uuid.uuid4().hex}", message_type="RawEvent",
+                        session_id=event.session_id, correlation_id=event.event_id,
+                        emitted_at=datetime.now(UTC), emitter=f"collector.{channel}", payload=event,
+                    )
+                    try:
+                        await self._bus.publish(envelope)
+                    except Exception as exc:
+                        self._record_failure("publish", exc)
+                        logger.exception("Durable raw event could not be published")
+                        raise
+                    self._published_event_keys.add(key)
+                return len(pending)
 
         # Complete disk persistence AND publication before releasing a cancelled
         # caller, so a worker thread cannot race the next live/exported ingest.
@@ -374,8 +404,10 @@ class SessionOrchestrator:
         """
         async for event in collector.iter_events():
             try:
-                await self.ingest_raw_event(
-                    event,
+                drain = getattr(collector, "pop_available", None)
+                batch = [event, *(drain(127) if drain else [])]
+                await self.ingest_raw_batch(
+                    batch,
                     writer,
                     channel=collector.source_name,
                     generation=self._sysmon_generation if collector.source_name == "sysmon" else 0,
@@ -464,6 +496,7 @@ class SessionOrchestrator:
 
                     last_record_id = next_id
 
+                    live_batch = []
                     for record in records:
                         try:
                             raw_event = raw_event_from_sysmon_item(record, session_id=session_id)
@@ -478,7 +511,7 @@ class SessionOrchestrator:
 
                         wall_clock_now = datetime.now(UTC)
                         gap = (wall_clock_now - raw_event.occurred_at).total_seconds()
-                        logger.info(
+                        logger.debug(
                             "[LIVE_POLL] record_id=%d EventID=%d TimeCreated=%s "
                             "ObservedAt=%s Gap=%.3fs Image=%s PID=%s",
                             record.record_id,
@@ -491,14 +524,12 @@ class SessionOrchestrator:
                         )
 
                         if writer is not None:
-                            accepted = await self.ingest_raw_event(
-                                raw_event,
-                                writer,
-                                channel="sysmon",
-                                generation=log_generation,
-                            )
-                            if accepted and "sysmon" in self._source_outcomes:
-                                self._source_outcomes["sysmon"].live_events_count += 1
+                            live_batch.append(raw_event)
+                            if len(live_batch) == 128:
+                                accepted = await self.ingest_raw_batch(live_batch, writer, channel="sysmon", generation=log_generation)
+                                if "sysmon" in self._source_outcomes:
+                                    self._source_outcomes["sysmon"].live_events_count += accepted
+                                live_batch = []
                         else:
                             envelope: Envelope[RawEvent] = Envelope(
                                 message_id=f"msg_{uuid.uuid4().hex}",
@@ -510,6 +541,11 @@ class SessionOrchestrator:
                                 payload=raw_event,
                             )
                             await self._bus.publish(envelope)
+
+                    if live_batch and writer is not None:
+                        accepted = await self.ingest_raw_batch(live_batch, writer, channel="sysmon", generation=log_generation)
+                        if "sysmon" in self._source_outcomes:
+                            self._source_outcomes["sysmon"].live_events_count += accepted
 
                     # Stop when the batch was short (the guest drained its
                     # current backlog) or the record ID did not advance (unless reset).
@@ -905,7 +941,15 @@ class SessionOrchestrator:
 
                 if guest_collectors:
                     for collector in guest_collectors:
-                        await asyncio.wait_for(collector.read_complete.wait(), timeout=120)
+                        try:
+                            await asyncio.wait_for(collector.read_complete.wait(), timeout=self._export_ingest_timeout_s)
+                        except TimeoutError as exc:
+                            problem = RuntimeError(
+                                f"{collector.source_name} export ingestion did not finish within "
+                                f"{self._export_ingest_timeout_s:g} seconds"
+                            )
+                            self._record_failure(collector.source_name, problem)
+                            raise problem from exc
                         outcome = self._source_outcomes.get(collector.source_name)
                         if collector.source_name == "procmon" and not collector._header_validated:
                             self._record_failure("procmon", RuntimeError("Exported CSV has no valid header"))

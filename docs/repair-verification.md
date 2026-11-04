@@ -10,7 +10,11 @@ Two cold `dumpcap -D` calls exceeded 15 seconds, preventing interface resolution
 
 The actual EVTX export renumbered binary headers from 1 while XML retained original IDs 444480–524512. Comparing the watermark directly against those headers incorrectly discarded all exported fresh events. The reader now establishes the offset only for contiguous exports with matching first/last anchors, otherwise filters by actual XML IDs. It recovered all **1,300 post-watermark records in 7.53 seconds** from the retained export; contiguous and sparse-export regressions pass.
 
-Host ingestion also overflowed: the Procmon CSV contains **253,699 rows**, while only 1,988 total raw events were persisted before the bounded ingestion failure. The session retained its artifacts and reported failure. Bounded backpressure and throughput repairs remain required before another VM verification attempt; enlarging buffers or accepting partial capture will not satisfy acceptance.
+Host ingestion also overflowed: independent CSV parsing finds **253,189 logical records** (253,699 physical data lines), while only 1,988 total raw events were persisted before the bounded ingestion failure. The session retained its artifacts and reported failure.
+
+File-backed collectors now apply bounded queue backpressure, and ingestion writes bounded batches before publication under the existing deduplication lock. Failed partial batch writes roll back; overlapping retries and cancellation remain safe. An isolated replay of the entire retained Procmon CSV persisted **all 253,189 records in 13.12 seconds**, with zero drops/errors. Independent JSONL validation confirmed contiguous source IDs and matching counts for every operation (`export-volume-profile-validated.json`). This is a collector/persistence throughput check, not replacement evidence for the real VM pipeline.
+
+Reports now use durable session/source counts when new raw data follows ADR-005's JSONL storage rather than the legacy SQLite raw table. A regression verifies correct totals and the distinction between captured and valid empty sources. Export-ingestion deadlines now record a source-specific error instead of an empty `TimeoutError` description. The verifier also requires a unique workload Sysmon event to be durably observed while an actual process query confirms that workload is still running; unrelated live events cannot satisfy the gate.
 
 ## Latest follow-up — November 5, 00:34 host time
 

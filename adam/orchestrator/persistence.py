@@ -64,19 +64,30 @@ class RawEventWriter:
         await asyncio.to_thread(self._write_sync, event)
 
     def _write_sync(self, event: RawEvent) -> None:
+        self._write_batch_sync([event])
+
+    async def write_batch(self, events: list[RawEvent]) -> None:
+        """Flush a bounded batch atomically before any events are published."""
+        if self._file is None:
+            raise RuntimeError("RawEventWriter.write_batch() called before open()")
+        if events:
+            await asyncio.to_thread(self._write_batch_sync, events)
+
+    def _write_batch_sync(self, events: list[RawEvent]) -> None:
         assert self._file is not None
         position = self._file.tell()
         try:
-            self._file.write(event.model_dump_json() + "\n")
+            for event in events:
+                self._file.write(event.model_dump_json() + "\n")
             self._file.flush()
-        except OSError:
+        except (OSError, ValueError, TypeError):
             # A partial disk write must not leave an invalid JSON fragment
             # ahead of a subsequently successful retry.
             self._file.seek(position)
             self._file.truncate(position)
             self._file.flush()
             raise
-        self._count += 1
+        self._count += len(events)
 
     async def close(self) -> None:
         await asyncio.to_thread(self._close_sync)

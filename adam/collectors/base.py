@@ -6,7 +6,8 @@ roadmap.md Phase 7. Shared `ICollector` scaffolding every concrete collector
 (SysmonCollector, ProcmonCollector, NetworkCollector, AgentCollector) is
 built on: the start()/stop()/iter_events() lifecycle, an internal bounded
 buffer, and the tail-loop bookkeeping every "watch a growing log source"
-collector needs regardless of what it's tailing.
+collector needs regardless of what it's tailing. File-backed collectors use
+awaitable backpressure so a slow consumer cannot discard exported records.
 
 Design note -- collectors do not publish to the bus themselves. The
 roadmap's Phase 7 spec is explicit: "each collector's iter_events() yields
@@ -26,7 +27,7 @@ Concrete collectors extend BaseCollector by implementing `_run()`: a
 coroutine that reads from the real source (a file tail, a pipe, an EVTX
 poll loop, whatever) and calls `self._emit(event)` for each `RawEvent` it
 produces. BaseCollector handles the start()/stop() task lifecycle,
-`_emit()`'s bounded-queue backpressure (drop-oldest, not block -- consistent
+`_emit()`'s live-input bounded-queue policy (drop-oldest, not block -- consistent
 with the bus's own "drop rather than block" philosophy, ARCHITECTURE.md
 section 8.3, applied here at the collector's own internal buffer), and
 `iter_events()`'s draining loop.
@@ -122,6 +123,21 @@ class BaseCollector(abc.ABC):
         """
         self._emit(event)
 
+    async def _emit_wait(self, event: RawEvent) -> None:
+        """File exports can pause reading instead of dropping captured records."""
+        await self._buffer.put(event)
+        self.emitted += 1
+
+    def pop_available(self, limit: int) -> list[RawEvent]:
+        """Drain a bounded batch already queued, without delaying live records."""
+        events = []
+        for _ in range(limit):
+            try:
+                events.append(self._buffer.get_nowait())
+            except asyncio.QueueEmpty:
+                break
+        return events
+
     def ingest_batch(self, events: list[RawEvent]) -> None:
         """Ingest a batch of live RawEvents."""
         for event in events:
@@ -199,7 +215,7 @@ class BaseCollector(abc.ABC):
         exiting early.
         """
         while True:
-            if self._stopped.is_set() and self._buffer.empty():
+            if self._stopped.is_set() and (self._task is None or self._task.done()) and self._buffer.empty():
                 return
             try:
                 event = await asyncio.wait_for(self._buffer.get(), timeout=0.1)

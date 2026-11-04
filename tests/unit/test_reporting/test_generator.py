@@ -78,6 +78,24 @@ def _make_semantic_event(sid, intent, mutation_id=None, network=None, tactic="TA
     )
 
 @pytest.mark.asyncio
+async def test_report_uses_durable_jsonl_counts_without_legacy_raw_sql_rows(generator, repos):
+    from adam.contracts.session import SourceOutcome
+    session = _make_session("jsonl_session", "jsonl_experiment", Arm.CONTROL)
+    session.metrics.raw_events = 7
+    session.source_outcomes = {
+        name: SourceOutcome(verified=True, capture_started=True, exported=True, parsed=True, events_count=count)
+        for name, count in (("sysmon", 3), ("procmon", 4), ("network", 0))
+    }
+    await repos["session"].create(session)
+    assert await repos["event"].get_raw_by_session(session.session_id) == []
+    report = json.loads(await generator.generate(session.session_id))
+    assert report["metrics"]["raw_events_count"] == 7
+    assert report["metrics"]["source_counts"] == {"Sysmon": 3, "Procmon": 4, "Tshark": 0}
+    assert report["source_outcomes"]["Sysmon"]["status"] == "CAPTURED"
+    assert report["source_outcomes"]["Tshark"]["status"] == "EMPTY"
+
+
+@pytest.mark.asyncio
 async def test_single_session_report(generator, repos):
     # Create session
     await repos["session"].create(_make_session("sess1", "exp1", Arm.TREATMENT))

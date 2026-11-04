@@ -132,6 +132,8 @@ class ProcmonCollector(BaseCollector):
                 complete_lines = [line for line in lines[:-1] if line.strip()]
 
                 for line in complete_lines:
+                    if self._stop_requested():
+                        return
                     if not self._header_validated:
                         self._header_validated = self._validate_header(line)
                         if not self._header_validated:
@@ -157,7 +159,7 @@ class ProcmonCollector(BaseCollector):
                         continue
 
                     self._sequence += 1
-                    self._emit(event)
+                    await self._emit_wait(event)
                     await asyncio.sleep(0)
 
             self.read_complete.set()
