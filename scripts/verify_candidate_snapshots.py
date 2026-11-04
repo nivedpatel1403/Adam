@@ -48,6 +48,7 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 from adam.common.config import get_settings
+from adam.common.power import keep_system_awake
 from adam.contracts.enums import Arm, SessionStatus
 from adam.orchestrator.runner import Runner
 from adam.sandbox.guest.http_channel import HTTPGuestChannel
@@ -650,6 +651,7 @@ class VerificationHTTPHandler(BaseHTTPRequestHandler):
         logger.info("Controlled guest request: %s", self.path)
 
 
+@keep_system_awake
 async def run_harness(args: argparse.Namespace) -> int:
     # The workload intentionally targets only this host-only address.
     CONTROLLED_REQUESTS.clear()

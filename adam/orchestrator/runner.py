@@ -59,6 +59,7 @@ from adam.collectors.base import BaseCollector
 from adam.common.bus import EventBus
 from adam.common.config import Settings, get_settings
 from adam.common.errors import ConfigError
+from adam.common.power import keep_system_awake
 from adam.contracts.enums import Arm, NetworkMode, SessionStatus
 from adam.contracts.session import AnalysisSession, SampleRef, SessionConfig, SessionMetrics
 from adam.db.repositories.sqlite import (
@@ -249,6 +250,7 @@ class Runner:
             )
         return GuestRuntime(channel=channel)
 
+    @keep_system_awake
     async def run(
         self,
         host_sample_path: str,
