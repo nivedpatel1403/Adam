@@ -2,7 +2,15 @@
 
 **Overall status: verification is in progress. Guest installation is complete, but the real pipeline and snapshot promotion have not passed.**
 
-## Latest pipeline finding — November 5, 01:04 host time
+## Latest pipeline finding — November 5, 01:46 host time
+
+Revision `e39556a` passed **515 tests with one skipped** in both environments, Ruff, dependency checks, and guest manifest verification. Build `a02fad5c6023a1fc` was deployed successfully; its actual functional capture and all deployed hashes passed before candidate `ae0298c8-c59c-46d0-a02c-d700e40c0633` was created. The original recovery `b15f95bb-d463-444f-9019-c7dd966a7d90` remains preserved.
+
+The real control run `sess_2026_11_04_92ce93f8` restored this candidate, automatically started the matching guest agent, persisted a marked Sysmon event while the workload was still running, and retrieved Sysmon, Procmon, and network exports. It subsequently failed the 120-second Procmon ingestion deadline and truthfully reported a partial session. Treatment, controlled failures, application acceptance, and promotion remain incomplete. The VM is powered off; the unrelated VDI hash is unchanged. No promotion occurred.
+
+Profiling the retained actual events reproduced the remaining bottleneck: 699 events took 30 profiled seconds, with 28 seconds in repeated detector scoring across retained correlation groups. The isolated batched persistence result therefore does not establish full-pipeline throughput. Repair and verify this analysis bottleneck before repeating both restore cycles. Evidence: `logs/repair-verification/20261104-211334/{pipeline-batched.json,pipeline-batched.log,fusion-slow-profile.txt,fusion-slow.prof,slow-ingestion-stack.txt}`. Dashboard browser inspection remains untested because Codex still exposes no browser connection. A headless dashboard acceptance script is prepared but has not been run against successful sessions.
+
+## Earlier pipeline finding — November 5, 01:04 host time
 
 Candidate `04bf6b56-3556-4f20-9e32-88307be24287` passed cold capture and all 13 deployed file hashes. Both environments then passed **505 tests with one skipped**, plus Ruff, dependencies, and manifest verification. The subsequent real control pipeline failed (`pipeline-readiness.json`), so no treatment cycle or promotion occurred. The original recovery remains preserved and the VM is powered off.
 
