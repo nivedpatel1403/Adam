@@ -28,20 +28,20 @@ Import-Module (Join-Path $PSScriptRoot 'Common.psm1')
 $Script:RunningCaptures = @{}
 
 function Resolve-HostOnlyInterfaceIndex {
-    param([Parameter(Mandatory = $true)][string]$TsharkPath)
+    param(
+        [Parameter(Mandatory = $true)][string]$TsharkPath,
+        [Parameter(Mandatory = $false)][object[]]$Adapters = @([Net.NetworkInformation.NetworkInterface]::GetAllNetworkInterfaces())
+    )
     try {
-        $listed = Get-NetworkInterfaces -TsharkPath $TsharkPath
-        if (-not $listed.success) { return $null }
-        foreach ($nic in [Net.NetworkInformation.NetworkInterface]::GetAllNetworkInterfaces()) {
+        # Npcap uses the Windows adapter GUID directly. Resolving it does
+        # not require launching a second, potentially cold dumpcap process.
+        foreach ($nic in $Adapters) {
             if ($nic.OperationalStatus -ne [Net.NetworkInformation.OperationalStatus]::Up) { continue }
             $hostOnly = @($nic.GetIPProperties().UnicastAddresses | Where-Object { $_.Address.ToString().StartsWith('192.168.19.') })
             if ($hostOnly.Count -eq 0) { continue }
-            $InterfaceGuid = $nic.Id.Trim('{}')
-            foreach ($iface in $listed.data.interfaces) {
-                if ($iface.description -match [regex]::Escape($InterfaceGuid)) {
-                    $device = [regex]::Match($iface.description, '\\Device\\NPF_\{[0-9A-Fa-f-]+\}')
-                    if ($device.Success) { return $device.Value }
-                }
+            $InterfaceGuid = [Guid]::Empty
+            if ([Guid]::TryParse($nic.Id, [ref]$InterfaceGuid)) {
+                return '\Device\NPF_' + $InterfaceGuid.ToString('B').ToUpperInvariant()
             }
         }
     } catch { }
@@ -56,7 +56,7 @@ function Get-NetworkInterfaces {
     try {
         $dumpcap = Join-Path (Split-Path -Parent $TsharkPath) 'dumpcap.exe'
         if (-not (Test-Path -LiteralPath $dumpcap)) { return New-ErrorEnvelope -ErrorCode $Script:ErrorCodes.ToolUnavailable -ErrorMessage 'dumpcap capture component is missing' }
-        $result = Invoke-NativeProcess -FilePath $dumpcap -ArgumentList @('-D') -TimeoutMs 15000
+        $result = Invoke-NativeProcess -FilePath $dumpcap -ArgumentList @('-D') -TimeoutMs 45000
         if ($result.TimedOut) {
             return New-ErrorEnvelope -ErrorCode $Script:ErrorCodes.Timeout -ErrorMessage "dumpcap -D did not complete in time"
         }

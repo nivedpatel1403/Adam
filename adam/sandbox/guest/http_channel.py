@@ -859,7 +859,7 @@ $filtered = @($lines | Where-Object {{ -not ($_.Contains($hostname) -and $_.Cont
 
         if capture_network and self._tshark_path is not None and (self._tool_availability is None or self._tool_availability.tshark_available):
             self._tshark_start_attempted = True
-            interfaces = await self._request("GET", "/network/interfaces", timeout=30.0, label="start_captures: list interfaces")
+            interfaces = await self._request("GET", "/network/interfaces", timeout=60.0, label="start_captures: list interfaces")
             if interfaces is not None:
                 logger.info(
                     "[HTTPGuestChannel] session=%s available interfaces: %s",

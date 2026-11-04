@@ -6,6 +6,34 @@ from pathlib import Path
 import pytest
 
 
+def test_native_auto_interface_does_not_depend_on_dumpcap_enumeration(tmp_path):
+    shell = shutil.which("powershell") or shutil.which("pwsh")
+    if not shell:
+        pytest.skip("PowerShell unavailable")
+    source = Path(__file__).resolve().parents[2] / "adam/sandbox/guest/agent/modules/NetworkManager.psm1"
+    command = r"""
+$ErrorActionPreference='Stop'
+$ast=[Management.Automation.Language.Parser]::ParseFile('__SOURCE__',[ref]$null,[ref]$null)
+$fn=$ast.Find({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Resolve-HostOnlyInterfaceIndex'},$true)
+Invoke-Expression $fn.Extent.Text
+function Get-NetworkInterfaces {throw 'Cold native enumeration must not be required'}
+$adapter=[pscustomobject]@{Id='{E40B10C3-4F31-4B5A-A264-0DCACEEF25BD}';OperationalStatus=[Net.NetworkInformation.OperationalStatus]::Up}
+$adapter | Add-Member ScriptMethod GetIPProperties {
+ return [pscustomobject]@{UnicastAddresses=@([pscustomobject]@{Address=[Net.IPAddress]::Parse('192.168.19.102')})}
+}
+$selected=Resolve-HostOnlyInterfaceIndex -TsharkPath unused -Adapters @($adapter)
+$adapter.OperationalStatus=[Net.NetworkInformation.OperationalStatus]::Down
+$absent=Resolve-HostOnlyInterfaceIndex -TsharkPath unused -Adapters @($adapter)
+@{selected=$selected;absent=$absent} | ConvertTo-Json -Compress
+""".replace("__SOURCE__", str(source).replace("'", "''"))
+    result = subprocess.run([shell, "-NoProfile", "-Command", command], check=False,
+                            capture_output=True, text=True, errors="replace", timeout=20)
+    assert result.returncode == 0, result.stdout + result.stderr
+    observed = json.loads(result.stdout)
+    assert observed["selected"] == r"\Device\NPF_{E40B10C3-4F31-4B5A-A264-0DCACEEF25BD}"
+    assert observed["absent"] is None
+
+
 @pytest.mark.parametrize("scenario", ["delayed", "timeout", "existing"])
 def test_native_capture_start_waits_for_output_and_cleans_owned_children(tmp_path, scenario):
     shell = shutil.which("powershell") or shutil.which("pwsh")
