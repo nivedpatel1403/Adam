@@ -30,10 +30,10 @@ async def test_overlapping_runs_hold_request_until_last_run_finishes(windows_req
     await second_entered.wait()
     release_first.set()
     await first
-    assert windows_request == [0x80000001]
+    assert windows_request == [0x80000003]
     release_second.set()
     await second
-    assert windows_request == [0x80000001, 0x80000002]
+    assert windows_request == [0x80000003, 0x80000002]
 
 
 @pytest.mark.asyncio
@@ -48,7 +48,7 @@ async def test_cancellation_releases_request(windows_request):
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
-    assert windows_request == [0x80000001, 0x80000002]
+    assert windows_request == [0x80000003, 0x80000002]
 
 
 def test_non_windows_does_not_call_windows_api(monkeypatch):

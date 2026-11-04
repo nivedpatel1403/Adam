@@ -17,6 +17,7 @@ from typing import ParamSpec, TypeVar
 _WINDOWS = sys.platform == "win32"
 _CONTINUOUS = 0x80000000
 _SYSTEM_REQUIRED = 0x00000001
+_DISPLAY_REQUIRED = 0x00000002
 _state = threading.local()
 logger = logging.getLogger(__name__)
 P = ParamSpec("P")
@@ -42,7 +43,9 @@ def system_awake() -> Iterator[None]:
         return
     depth = getattr(_state, "depth", 0)
     if depth == 0:
-        _state.previous = _execution_state(_CONTINUOUS | _SYSTEM_REQUIRED)
+        # Modern Standby starts when the display idles off; system-only
+        # requests can expire on battery. Hold both for the bounded run.
+        _state.previous = _execution_state(_CONTINUOUS | _SYSTEM_REQUIRED | _DISPLAY_REQUIRED)
         logger.info("Temporary Windows system-awake request acquired")
     _state.depth = depth + 1
     try:
