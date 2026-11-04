@@ -272,10 +272,44 @@ def iter_evtx_records(evtx_path: str, *, min_record_id: int | None = None) -> It
     # code's typing.
     import Evtx.Evtx as evtx  # type: ignore[import-untyped]
 
+    def xml_record_id(xml_text: str) -> int | None:
+        try:
+            node = ElementTree.fromstring(xml_text).find(f"{_NS}System/{_NS}EventRecordID")
+            return int(node.text) if node is not None and node.text else None
+        except (ElementTree.ParseError, ValueError):
+            return None
+
     with evtx.Evtx(evtx_path) as log:
+        offset = None
+        if min_record_id is not None:
+            # `wevtutil epl` can renumber binary record headers from 1 while
+            # preserving original EventRecordID values in XML. Establish an
+            # offset only for a contiguous, single-channel export whose first
+            # and last original IDs span exactly its sequential headers.
+            first = last = None
+            previous = None
+            contiguous = True
+            for record in log.records():
+                number = record.record_num()
+                if first is None:
+                    first = record
+                if previous is not None and number != previous + 1:
+                    contiguous = False
+                previous = number
+                last = record
+            if contiguous and first is not None and last is not None:
+                first_id = xml_record_id(first.xml())
+                last_id = xml_record_id(last.xml())
+                if first_id is not None and last_id is not None:
+                    candidate = first_id - first.record_num()
+                    if last_id - last.record_num() == candidate:
+                        offset = candidate
         for record in log.records():
-            # EVTX record headers carry the same EventRecordID as the XML.
-            # Skip historical records before expensive XML rendering.
-            if min_record_id is not None and record.record_num() <= min_record_id:
+            if min_record_id is not None and offset is not None and record.record_num() + offset <= min_record_id:
                 continue
-            yield record.xml()
+            xml_text = record.xml()
+            if min_record_id is not None and offset is None:
+                actual_id = xml_record_id(xml_text)
+                if actual_id is not None and actual_id <= min_record_id:
+                    continue
+            yield xml_text

@@ -2,6 +2,16 @@
 
 **Overall status: verification is in progress. Guest installation is complete, but the real pipeline and snapshot promotion have not passed.**
 
+## Latest pipeline finding — November 5, 01:04 host time
+
+Candidate `04bf6b56-3556-4f20-9e32-88307be24287` passed cold capture and all 13 deployed file hashes. Both environments then passed **505 tests with one skipped**, plus Ruff, dependencies, and manifest verification. The subsequent real control pipeline failed (`pipeline-readiness.json`), so no treatment cycle or promotion occurred. The original recovery remains preserved and the VM is powered off.
+
+Two cold `dumpcap -D` calls exceeded 15 seconds, preventing interface resolution. The private automatic resolver now derives Npcap's device path from the active Windows adapter GUID and host-only address, independent of native enumeration. Explicit interface diagnostics retain bounded native enumeration with a 45-second budget and a longer host request budget. A native regression verifies that automatic selection still works when native enumeration fails, and never falls back to a down adapter. New package **`a02fad5c6023a1fc`** is prepared but **not yet deployed**.
+
+The actual EVTX export renumbered binary headers from 1 while XML retained original IDs 444480–524512. Comparing the watermark directly against those headers incorrectly discarded all exported fresh events. The reader now establishes the offset only for contiguous exports with matching first/last anchors, otherwise filters by actual XML IDs. It recovered all **1,300 post-watermark records in 7.53 seconds** from the retained export; contiguous and sparse-export regressions pass.
+
+Host ingestion also overflowed: the Procmon CSV contains **253,699 rows**, while only 1,988 total raw events were persisted before the bounded ingestion failure. The session retained its artifacts and reported failure. Bounded backpressure and throughput repairs remain required before another VM verification attempt; enlarging buffers or accepting partial capture will not satisfy acceptance.
+
 ## Latest follow-up — November 5, 00:34 host time
 
 The cold capture check found another real failure: the workload exited 0, live Sysmon and 1,654 matching Procmon records were present, and the host received all four controlled requests, but the raw packet file lacked the workload marker. Its creation time and first packet were about 49 seconds after the agent had declared Tshark started, after the requests. `functional-3c75c13d/result.json` records the failed check; no candidate was promoted.

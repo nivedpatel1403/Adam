@@ -9,16 +9,34 @@ from adam.sandbox.shutdown import shutdown_normally
 
 def test_evtx_watermark_filters_before_xml_render(monkeypatch):
     import Evtx.Evtx as evtx
-    records = [SimpleNamespace(record_num=lambda n=n:n, xml=Mock(return_value=f'record {n}')) for n in (1,2,3)]
+    def xml(number):
+        return f'<Event xmlns="http://schemas.microsoft.com/win/2004/08/events/event"><System><EventRecordID>{number}</EventRecordID></System></Event>'
+    records = [SimpleNamespace(record_num=lambda n=n:n, xml=Mock(return_value=xml(n+999))) for n in (1,2,3,4)]
     class Log:
         def __init__(self, path): pass
         def __enter__(self): return self
         def __exit__(self, *args): pass
         def records(self): return iter(records)
     monkeypatch.setattr(evtx, 'Evtx', Log)
-    assert list(iter_evtx_records('unused', min_record_id=2)) == ['record 3']
-    records[0].xml.assert_not_called()
+    assert list(iter_evtx_records('unused', min_record_id=1002)) == [xml(1003)]
+    records[0].xml.assert_called_once()  # Establish the export's rebased offset.
     records[1].xml.assert_not_called()
+    records[2].xml.assert_not_called()
+
+
+def test_sparse_export_filters_original_ids_without_inventing_offset(monkeypatch):
+    import Evtx.Evtx as evtx
+    def xml(number):
+        return f'<Event xmlns="http://schemas.microsoft.com/win/2004/08/events/event"><System><EventRecordID>{number}</EventRecordID></System></Event>'
+    records = [SimpleNamespace(record_num=lambda n=n:n, xml=Mock(return_value=xml(original)))
+               for n, original in ((1,1000),(2,1010),(3,1020))]
+    class Log:
+        def __init__(self, path): pass
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        def records(self): return iter(records)
+    monkeypatch.setattr(evtx, 'Evtx', Log)
+    assert list(iter_evtx_records('unused', min_record_id=1005)) == [xml(1010),xml(1020)]
 
 
 @pytest.mark.asyncio
