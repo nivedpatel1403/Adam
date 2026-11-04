@@ -2,6 +2,14 @@
 
 **Overall status: verification is in progress. Guest installation is complete, but the real pipeline and snapshot promotion have not passed.**
 
+## Latest follow-up — November 5, 00:34 host time
+
+The cold capture check found another real failure: the workload exited 0, live Sysmon and 1,654 matching Procmon records were present, and the host received all four controlled requests, but the raw packet file lacked the workload marker. Its creation time and first packet were about 49 seconds after the agent had declared Tshark started, after the requests. `functional-3c75c13d/result.json` records the failed check; no candidate was promoted.
+
+Network startup now waits for a new pcapng output with header data and an owned dumpcap process, with a bounded deadline and cleanup of that capture's parent/children on failure. Existing output is rejected without modification. The host request budget includes readiness and cleanup. The focused PowerShell/HTTP checks passed **47 tests**, including delayed readiness, timeout cleanup, and existing-output rejection.
+
+Replacement guest build **`fb43be294341a297`** transferred with package SHA-256 `1a4c03bcb48963b1c79f8a33c58b74aec00784ff6da4ec42851cd74947c00695`. Its deployment completed successfully and the running agent identified the new build (`readiness-deployment-result.json`). A fresh cold capture and candidate preparation are in progress. The original recovery and failed candidate `819c969b-aad1-4715-a3e7-fa1b6aeba00c` remain preserved pending that gate. The latest full suites below predate this capture-readiness change; complete checks must run again before promotion.
+
 ## Current execution — 2026-11-04, 23:40 host time
 
 This section supersedes the historical installation blockers below. The user completed the Npcap wizard and agent installation. No repeat installer action is currently required.

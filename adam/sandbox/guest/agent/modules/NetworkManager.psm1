@@ -78,12 +78,16 @@ function Invoke-NetworkStart {
         [Parameter(Mandatory = $true)][string]$TsharkPath,
         [Parameter(Mandatory = $true)][string]$SessionId,
         [Parameter(Mandatory = $false)][string]$Interface,
-        [Parameter(Mandatory = $true)][string]$PcapPath
+        [Parameter(Mandatory = $true)][string]$PcapPath,
+        [Parameter(Mandatory = $false)][int]$CaptureReadyTimeoutMs = 90000
     )
     if (-not (Test-Path -LiteralPath $TsharkPath)) {
         return New-ErrorEnvelope -ErrorCode $Script:ErrorCodes.ToolUnavailable -ErrorMessage "tshark not found at $TsharkPath"
     }
     try {
+        if ($Script:RunningCaptures.ContainsKey($SessionId) -or (Test-Path -LiteralPath $PcapPath)) {
+            return New-ErrorEnvelope -ErrorCode $Script:ErrorCodes.InvalidArgument -ErrorMessage 'Capture session or output already exists'
+        }
         $targetInterface = $Interface
         $matchedIndex = Resolve-HostOnlyInterfaceIndex -TsharkPath $TsharkPath
         if ($targetInterface -eq 'auto' -and -not $matchedIndex) {
@@ -113,16 +117,31 @@ function Invoke-NetworkStart {
         if ($null -eq $result.Pid) {
             return New-ErrorEnvelope -ErrorCode $Script:ErrorCodes.InternalError -ErrorMessage $result.StdErr
         }
-        Start-Sleep -Milliseconds 500
-        $children = @(Get-CimInstance Win32_Process -Filter "ParentProcessId=$($result.Pid) AND Name='dumpcap.exe'" | ForEach-Object { Get-Process -Id $_.ProcessId -ErrorAction SilentlyContinue })
-        if ($result.Process.HasExited) {
-            return New-ErrorEnvelope -ErrorCode $Script:ErrorCodes.ToolUnavailable -ErrorMessage "tshark exited before capture became ready"
+        $Script:RunningCaptures[$SessionId] = @{ Process = $result.Process; Children = @() }
+        $clock = [Diagnostics.Stopwatch]::StartNew()
+        $ready = $false
+        # A live tshark PID is not capture readiness. On a cold Windows boot
+        # plugin/driver initialization can take tens of seconds before dumpcap
+        # creates the pcapng section and interface blocks (at least 48 bytes).
+        while ($clock.ElapsedMilliseconds -lt $CaptureReadyTimeoutMs) {
+            if ($result.Process.HasExited) { throw 'tshark exited before capture became ready' }
+            if ((Test-Path -LiteralPath $PcapPath) -and (Get-Item -LiteralPath $PcapPath).Length -ge 48) {
+                $children = @(Get-CimInstance Win32_Process -Filter "ParentProcessId=$($result.Pid) AND Name='dumpcap.exe'" | ForEach-Object { Get-Process -Id $_.ProcessId -ErrorAction SilentlyContinue })
+                $Script:RunningCaptures[$SessionId].Children = $children
+                if ($children.Count -gt 0) { $ready = $true; break }
+            }
+            Start-Sleep -Milliseconds 250
         }
-        $Script:RunningCaptures[$SessionId] = @{ Process = $result.Process; Children = $children }
+        if (-not $ready) { throw 'Capture readiness deadline exceeded before pcapng interface initialization' }
         Write-AgentLog -Message "session=$SessionId tshark started pid=$($result.Pid) interface=$targetInterface pcap=$PcapPath"
         return New-SuccessEnvelope -Data @{ pid = $result.Pid }
     } catch {
-        return New-ErrorEnvelope -ErrorCode $Script:ErrorCodes.InternalError -ErrorMessage $_.Exception.Message
+        $problem = $_.Exception.Message
+        if ($Script:RunningCaptures.ContainsKey($SessionId)) {
+            $cleanup = Invoke-NetworkStop -SessionId $SessionId
+            if (-not $cleanup.success) { $problem += "; cleanup failed: $($cleanup.error_message)" }
+        }
+        return New-ErrorEnvelope -ErrorCode $Script:ErrorCodes.InternalError -ErrorMessage $problem
     }
 }
 
@@ -135,6 +154,12 @@ function Invoke-NetworkStop {
         if ($Script:RunningCaptures.ContainsKey($SessionId)) {
             $capture = $Script:RunningCaptures[$SessionId]
             $proc = $capture.Process
+            if ($proc -and -not $proc.HasExited) {
+                # A startup timeout may occur after dumpcap was spawned but
+                # before its output became ready. Discover only this owned
+                # parent's capture children before terminating the parent.
+                $capture.Children = @(Get-CimInstance Win32_Process -Filter "ParentProcessId=$($proc.Id) AND Name='dumpcap.exe'" | ForEach-Object { Get-Process -Id $_.ProcessId -ErrorAction SilentlyContinue })
+            }
             if ($proc) {
                 try {
                     $proc.CloseMainWindow() | Out-Null

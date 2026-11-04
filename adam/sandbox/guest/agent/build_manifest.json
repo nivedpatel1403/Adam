@@ -1,6 +1,6 @@
 {
-  "build_id": "9162ca3b10c63871",
-  "created_utc": "2026-11-04T17:23:04.827945+00:00",
+  "build_id": "fb43be294341a297",
+  "created_utc": "2026-11-04T18:59:37.731975+00:00",
   "file_count": 13,
   "files": {
     "adam_agent.ps1": {
@@ -32,8 +32,8 @@
       "size_bytes": 7953
     },
     "modules/NetworkManager.psm1": {
-      "sha256": "423fa1a1d040cd6f100e55025e961a10244b8f4772ccdc3d8b75cc26c4d9ca1b",
-      "size_bytes": 10893
+      "sha256": "26fb34098e388ebeb9394657e3dbfa11d77bef5201e28929977cbb967ecbe504",
+      "size_bytes": 12693
     },
     "modules/ProcessManager.psm1": {
       "sha256": "b603cd9730eb3e1e4b87ae4a12370dd0b68cc510e08f6a68cff169856feffc29",

@@ -871,7 +871,7 @@ $filtered = @($lines | Where-Object {{ -not ($_.Contains($hostname) -and $_.Cont
                 json_body=NetworkStartRequest(
                     session_id=session_id, interface=self._tshark_interface, pcap_path=pcap_path
                 ).model_dump(),
-                timeout=60.0, label="start_captures: tshark",
+                timeout=120.0, label="start_captures: tshark",
             )
             logger.info("[HTTPGuestChannel] session=%s tshark start result=%s", session_id, result)
             if result is not None:
