@@ -76,7 +76,7 @@ async def test_promotion_rejects_same_snapshot_without_mutation():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("failed_check", ["telemetry_verified", "vm_stopped", "pre_clean_verified", "guest_ready"])
+@pytest.mark.parametrize("failed_check", ["telemetry_verified", "vm_stopped", "pre_clean_verified", "guest_ready", "live_workload_observed"])
 async def test_harness_never_promotes_incomplete_cycle(tmp_path, monkeypatch, failed_check):
     disk = tmp_path / "orphan.vdi"
     disk.write_bytes(b"unchanged disk")
@@ -89,7 +89,7 @@ async def test_harness_never_promotes_incomplete_cycle(tmp_path, monkeypatch, fa
         sysmon_log="unused", tshark_interface="auto", auth_token=None))
     monkeypatch.setattr(harness, "get_settings", lambda: settings)
     monkeypatch.setattr(harness, "HTTPGuestChannel", lambda **kwargs: SimpleNamespace(aclose=AsyncMock()))
-    checks = {key: True for key in ("restore_success", "guest_ready", "pre_clean_verified", "marker_planted", "workload_executed", "telemetry_verified", "vm_stopped", "state_reset_verified")}
+    checks = {key: True for key in ("restore_success", "guest_ready", "pre_clean_verified", "marker_planted", "workload_executed", "telemetry_verified", "vm_stopped", "state_reset_verified", "live_workload_observed")}
     checks[failed_check] = False
     monkeypatch.setattr(harness, "run_verification_cycle", AsyncMock(return_value=checks))
     promotion = AsyncMock()

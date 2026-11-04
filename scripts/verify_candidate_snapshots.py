@@ -39,9 +39,11 @@ import subprocess
 import sys
 import time
 import uuid
+from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from threading import Thread
+from unittest.mock import patch
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(_PROJECT_ROOT) not in sys.path:
@@ -49,7 +51,8 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 from adam.common.config import get_settings
 from adam.common.power import keep_system_awake
-from adam.contracts.enums import Arm, SessionStatus
+from adam.contracts.enums import Arm, SessionStatus, Source
+from adam.orchestrator.persistence import RawEventWriter
 from adam.orchestrator.runner import Runner
 from adam.sandbox.guest.http_channel import HTTPGuestChannel
 from adam.sandbox.shutdown import shutdown_normally
@@ -281,11 +284,44 @@ async def run_verification_cycle(
     settings.http_guest.tshark_interface = "auto"
     settings.network.host = settings.network.host_ip = "192.168.19.2"
     settings.live.enabled = True
+    active_ref = {}
+    result["live_workload_observed"] = False
+
+    async def observe_live_persistence(events):
+        if result.get("live_marker_checked"):
+            return
+        for event in events:
+            if (event.source == Source.SYSMON and str(event.raw_ref).startswith("guest:sysmon:")
+                    and event.process and marker.lower() in event.process.image.lower()):
+                result["live_marker_checked"] = True
+                proof = {"record_id": event.source_event_id, "pid": event.process.pid,
+                         "image": event.process.image, "occurred_at": event.occurred_at.isoformat()}
+                try:
+                    status = await active_ref["channel"].wait_process(event.process.pid)
+                    proof.update(status=status, checked_at=datetime.now(UTC).isoformat())
+                    result["live_workload_observed"] = status.get("exited") is False
+                except Exception as exc:
+                    logger.exception("Live workload persistence observation failed")
+                    proof["error"] = str(exc)
+                (evidence / "live-workload-observation.json").write_text(json.dumps(proof, indent=2))
+                return
+
+    class ObservedWriter(RawEventWriter):
+        # Read-only observation of real persistence; no synthetic telemetry or
+        # altered writes. Exported events cannot satisfy the live-source gate.
+        async def write(self, event):
+            await super().write(event)
+            await observe_live_persistence([event])
+
+        async def write_batch(self, events):
+            await super().write_batch(events)
+            await observe_live_persistence(events)
 
     class VerificationRunner(Runner):
         def _build_guest_channel(self, client, config, **kwargs):
             runtime = super()._build_guest_channel(client, config, **kwargs)
             active = runtime.channel
+            active_ref["channel"] = active
             original_restore = client.restore_snapshot
             original_verify = active.verify_tools
             original_export = active.stop_export_and_fetch
@@ -350,8 +386,9 @@ async def run_verification_cycle(
 
     try:
         await asyncio.to_thread(subprocess.run, [str(compiler), "/nologo", f"/out:{sample}", str(_PROJECT_ROOT / "scripts/verification_workload.cs")], check=True, capture_output=True)
-        session = await VerificationRunner(settings).run(str(sample.resolve()), artifacts_dir=evidence,
-            arm=Arm.CONTROL if cycle_index == 1 else Arm.TREATMENT)
+        with patch("adam.orchestrator.session.RawEventWriter", ObservedWriter):
+            session = await VerificationRunner(settings).run(str(sample.resolve()), artifacts_dir=evidence,
+                arm=Arm.CONTROL if cycle_index == 1 else Arm.TREATMENT)
         (evidence / "session.json").write_text(session.model_dump_json(indent=2), encoding="utf-8")
         result.update(session_id=session.session_id, session_status=session.status.value,
                       source_outcomes={key: value.model_dump() for key, value in session.source_outcomes.items()})
@@ -385,7 +422,7 @@ async def run_verification_cycle(
         result["marker_planted"] = all(value for key, value in correlation.items() if key.endswith((".file", ".registry")))
         result["workload_executed"] = session.status == SessionStatus.COMPLETED and session.execution_exit_code == 0
         outcomes = session.source_outcomes
-        result["telemetry_verified"] = bool(result["workload_executed"] and all(correlation.values())
+        result["telemetry_verified"] = bool(result["workload_executed"] and result["live_workload_observed"] and all(correlation.values())
             and outcomes.get("sysmon") and outcomes["sysmon"].live_events_count > 0
             and all(outcomes.get(key) and outcomes[key].verified and outcomes[key].capture_started
                 and outcomes[key].exported and outcomes[key].parsed and not outcomes[key].errors
@@ -552,7 +589,7 @@ async def _run_harness(args: argparse.Namespace) -> int:
     recovery_snap = recoveries[0].uuid
 
     # 2. Execute 2 consecutive cycles
-    required_checks = ("restore_success", "guest_ready", "pre_clean_verified", "marker_planted",
+    required_checks = ("restore_success", "guest_ready", "pre_clean_verified", "marker_planted", "live_workload_observed",
                        "workload_executed", "telemetry_verified", "vm_stopped")
     channel1 = _create_channel()
     try:
