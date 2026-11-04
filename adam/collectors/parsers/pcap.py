@@ -119,9 +119,17 @@ def parse_tshark_ek_line(
         raise PcapParseError(f"non-integer frame.number: {number_raw!r}") from exc
 
     try:
-        occurred_at = datetime.fromtimestamp(float(epoch_raw), tz=UTC)
-    except ValueError as exc:
-        raise PcapParseError(f"non-numeric frame.time_epoch: {epoch_raw!r}") from exc
+        if isinstance(epoch_raw, str) and "T" in epoch_raw:
+            # Current Tshark EK exports can encode FT_ABSOLUTE_TIME as an
+            # ISO timestamp even under the frame_time_epoch field name.
+            occurred_at = datetime.fromisoformat(epoch_raw)
+            if occurred_at.tzinfo is None:
+                raise ValueError("Packet timestamp has no timezone")
+            occurred_at = occurred_at.astimezone(UTC)
+        else:
+            occurred_at = datetime.fromtimestamp(float(epoch_raw), tz=UTC)
+    except (ValueError, TypeError, OverflowError) as exc:
+        raise PcapParseError(f"invalid frame.time_epoch: {epoch_raw!r}") from exc
 
     ip_layer = _layer(layers, "ip")
     ipv6_layer = _layer(layers, "ipv6")

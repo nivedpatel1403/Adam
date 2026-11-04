@@ -10,6 +10,8 @@ Network startup now waits for a new pcapng output with header data and an owned 
 
 Replacement guest build **`fb43be294341a297`** transferred with package SHA-256 `1a4c03bcb48963b1c79f8a33c58b74aec00784ff6da4ec42851cd74947c00695`. Its deployment completed successfully and the running agent identified the new build (`readiness-deployment-result.json`). A fresh cold capture and candidate preparation are in progress. The original recovery and failed candidate `819c969b-aad1-4715-a3e7-fa1b6aeba00c` remain preserved pending that gate. The latest full suites below predate this capture-readiness change; complete checks must run again before promotion.
 
+The new cold capture subsequently passed (`functional-57b972e8/result.json`): exit 0, fresh live Sysmon IDs 1/3/11/12/13, 1,728 matching Procmon records, and workload-correlated packets and host requests. Independent parsing exposed and fixed another actual-format mismatch: this Tshark EK export puts timezone-aware ISO strings in `frame_time_epoch`. The parser now accepts these as well as numeric epochs and rejects timezone-less ISO strings. Eight format tests pass; all **430 actual packet records parsed**, including **eight records containing the unique workload marker** (`cold-capture-parsed-check.json`). Candidate preparation still requires deployed-file verification, cleanup, and normal shutdown before a snapshot is created.
+
 ## Current execution — 2026-11-04, 23:40 host time
 
 This section supersedes the historical installation blockers below. The user completed the Npcap wizard and agent installation. No repeat installer action is currently required.

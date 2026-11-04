@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 
 import pytest
 
-from adam.collectors.parsers.pcap import parse_tshark_ek_line
+from adam.collectors.parsers.pcap import PcapParseError, parse_tshark_ek_line
 from adam.collectors.parsers.pml import (
     ProcmonParseError,
     normalize_procmon_csv,
@@ -26,6 +26,26 @@ def test_actual_tshark_ek_field_names_preserve_http_endpoint():
     assert event.attributes["network_endpoint"] == "http://192.168.19.2:18080/unique"
     assert event.attributes["dst_ip"] == "192.168.19.2"
     assert event.attributes["dst_port"] == "18080"
+
+
+@pytest.mark.parametrize("timestamp", [
+    "2026-11-04T18:53:38.310877900Z",
+    "2026-11-05T00:23:38.310877900+05:30",
+])
+def test_real_ek_iso_timestamp_preserves_utc(timestamp):
+    packet = {"layers": {"frame": {
+        "frame_frame_number": "1", "frame_frame_time_epoch": timestamp,
+    }}}
+    event = parse_tshark_ek_line(json.dumps(packet), session_id="actual-iso-format")
+    assert event.occurred_at == datetime(2026, 11, 4, 18, 53, 38, 310877, tzinfo=UTC)
+
+
+def test_timezone_missing_packet_timestamp_is_rejected():
+    packet = {"layers": {"frame": {
+        "frame_frame_number": "1", "frame_frame_time_epoch": "2026-11-04T18:53:38",
+    }}}
+    with pytest.raises(PcapParseError, match="invalid frame.time_epoch"):
+        parse_tshark_ek_line(json.dumps(packet), session_id="ambiguous-time")
 
 
 def make_csv(path, times):
