@@ -229,6 +229,16 @@ class EventBus:
                         self._consume(subscriber), name=f"adam.bus.{subscriber.subscription.name}"
                     )
 
+    async def wait_idle(self, timeout: float) -> None:
+        """Wait for cascading handlers without stopping the reusable API bus."""
+        async def settle() -> None:
+            while True:
+                subscribers = [s for group in self._subscribers.values() for s in group]
+                await asyncio.gather(*(subscriber.queue.join() for subscriber in subscribers))
+                if all(subscriber.queue._unfinished_tasks == 0 for subscriber in subscribers):
+                    return
+        await asyncio.wait_for(settle(), timeout=timeout)
+
     async def drain(self, timeout: float) -> None:
         """
         Waits up to `timeout` seconds total for every subscriber queue to

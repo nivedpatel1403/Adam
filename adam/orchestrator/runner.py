@@ -49,6 +49,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -61,7 +62,17 @@ from adam.common.config import Settings, get_settings
 from adam.common.errors import ConfigError
 from adam.common.power import keep_system_awake
 from adam.contracts.enums import Arm, NetworkMode, SessionStatus
-from adam.contracts.session import AnalysisSession, SampleRef, SessionConfig, SessionMetrics
+from adam.contracts.envelope import Envelope
+from adam.contracts.mutation import MutationResult
+from adam.contracts.policy_decision import PolicyDecision
+from adam.contracts.semantic_event import SemanticEvent
+from adam.contracts.session import (
+    AnalysisSession,
+    SampleRef,
+    SessionConfig,
+    SessionLifecycle,
+    SessionMetrics,
+)
 from adam.db.repositories.sqlite import (
     SQLiteSessionRepository,
 )
@@ -264,6 +275,8 @@ class Runner:
         arm: Arm | None = None,
         deception_enabled: bool | None = None,
         sample_timeout_seconds: int = 300,
+        session_id: str | None = None,
+        event_observer: Callable[[Envelope], Awaitable[None]] | None = None,
     ) -> AnalysisSession:
         """
         Loads (and thereby validates -- fail-fast) Settings, builds the
@@ -288,7 +301,7 @@ class Runner:
             experiment.dry_run,
         )
         sample = sample_ref_from_path(host_sample_path)
-        session_id = new_session_id()
+        session_id = session_id or new_session_id()
 
         collectors = self._build_collectors(
             session_id,
@@ -335,6 +348,10 @@ class Runner:
         if vm_profile:
             controller.vm_profile = vm_profile
         bus = EventBus()
+        if event_observer is not None:
+            for event_type in (SemanticEvent, PolicyDecision, MutationResult, SessionLifecycle):
+                bus.subscribe(event_type, event_observer,
+                              name=f"console_{event_type.__name__}", queue_size=1000)
 
         # Phase 8 wiring parity & ReportGenerator integration:
         # Subscribe Fusion/Policy/Deception and DBWriter to the bus so a live

@@ -26,7 +26,13 @@ from adam.contracts.mutation import MutationResult
 from adam.contracts.policy_decision import PolicyDecision
 from adam.contracts.raw_event import RawEvent
 from adam.contracts.semantic_event import SemanticEvent
-from adam.contracts.session import AnalysisSession, SampleRef, SessionConfig, SessionMetrics
+from adam.contracts.session import (
+    AnalysisSession,
+    SampleRef,
+    SessionConfig,
+    SessionFailure,
+    SessionMetrics,
+)
 from adam.fusion.log_generate import generate_attack_chain, generate_benign_events
 
 if TYPE_CHECKING:
@@ -74,10 +80,15 @@ async def store_event(envelope: Envelope):
             if status in ("APPLIED", MutationStatus.APPLIED, getattr(MutationStatus.APPLIED, "value", "APPLIED")):
                 metadata.metrics.mutations_applied += 1
         
+    from adam.api.console import broadcast
+    broadcast(msg_type, payload_dict)
+
     # Broadcast to SSE
     sse_msg = f"event: {msg_type}\ndata: {payload_json}\n\n"
     for q in clients:
-        await q.put(sse_msg)
+        if q.full():
+            q.get_nowait()
+        q.put_nowait(sse_msg)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -85,14 +96,19 @@ async def lifespan(app: FastAPI):
     from adam.api.deps import deps, init_dependencies, shutdown_dependencies
     
     await init_dependencies()
+    from adam.api.console import init_console
+    await init_console()
     
     deps.bus.subscribe(SemanticEvent, store_event, name="api_events")
     deps.bus.subscribe(PolicyDecision, store_event, name="api_decisions")
     deps.bus.subscribe(MutationResult, store_event, name="api_mutations")
     
-    yield
-    
-    await shutdown_dependencies()
+    try:
+        yield
+    finally:
+        from adam.api.console import shutdown_jobs
+        await shutdown_jobs()
+        await shutdown_dependencies()
 
 app = FastAPI(title="ADAM Live API", lifespan=lifespan)
 
@@ -245,8 +261,14 @@ async def run_deterministic_simulation(session_id: str, seed: int):
         await deps.bus.publish(env)
         await asyncio.sleep(0.005) # space out events
                 
-    # Allow bus consumer tasks to finish processing
-    await asyncio.sleep(0.1)
+    # Completion follows actual downstream processing and durable writes.
+    await deps.bus.wait_idle(timeout=60)
+    for _ in range(3):
+        if not deps.db_writer.queue:
+            break
+        await deps.db_writer.flush()
+    if deps.db_writer.queue:
+        raise RuntimeError("Simulation persistence did not complete after three flush attempts")
 
     # Mark as completed
     metadata.status = SessionStatus.COMPLETED
@@ -254,6 +276,8 @@ async def run_deterministic_simulation(session_id: str, seed: int):
     await deps.session_repo.update(metadata)
     await deps.db_conn.commit()
     
+    from adam.api.console import broadcast
+    broadcast("SessionCompleted", {"session_id": session_id, "status": metadata.status.value})
     await deps.bus.publish(Envelope[dict](
         envelope_version="1.0",
         message_id=str(uuid.uuid4()),
@@ -319,7 +343,18 @@ async def simulate_session(
     async def create_and_run():
         await deps.session_repo.create(metadata)
         await deps.db_conn.commit()
-        await run_deterministic_simulation(session_id, seed)
+        try:
+            await run_deterministic_simulation(session_id, seed)
+        except Exception as exc:
+            logging.getLogger(__name__).exception("Simulation failed: %s", session_id)
+            metadata.status = SessionStatus.FAILED
+            metadata.error = str(exc)
+            metadata.ended_at = datetime.now(UTC)
+            metadata.failures.append(SessionFailure(stage="simulation", code=type(exc).__name__, description=str(exc)))
+            await deps.session_repo.update(metadata)
+            await deps.db_conn.commit()
+            from adam.api.console import broadcast
+            broadcast("SessionCompleted", {"session_id": session_id, "status": "FAILED"})
 
     background_tasks.add_task(create_and_run)
     return {"session_id": session_id, "status": "RUNNING"}
@@ -359,7 +394,7 @@ async def run_experiment(background_tasks: BackgroundTasks, file: Annotated[Uplo
 
 @app.get("/api/v1/stream")
 async def sse_stream(request: Request):
-    q = asyncio.Queue()
+    q = asyncio.Queue(maxsize=256)
     clients.append(q)
     
     async def event_generator():
@@ -374,6 +409,36 @@ async def sse_stream(request: Request):
                 clients.remove(q)
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+# ── Minimal API Glue for Frontend ──────────────────────────────────────────
+
+@app.post("/api/v1/sessions/replay")
+async def replay_session():
+    """Run the synthetic replay via adam.cli.main replay synthetic."""
+    import re
+    import subprocess
+    import sys
+
+    res = await asyncio.to_thread(
+        lambda: subprocess.run(
+            [sys.executable, "-m", "adam.cli.main", "replay", "synthetic"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    )
+    match = re.search(r"Session ID: (replay_\w+)", res.stdout)
+    if match and res.returncode == 0:
+        return {"session_id": match.group(1), "status": "COMPLETED"}
+    return JSONResponse(
+        {"error": "Replay failed", "stderr": res.stderr[:2000], "stdout": res.stdout[:2000]},
+        status_code=500,
+    )
+
+
+from adam.api.console import router as console_router
+
+app.include_router(console_router)
 
 from adam.dashboard.router import dashboard_router
 

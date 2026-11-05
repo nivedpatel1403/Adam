@@ -69,3 +69,6 @@ samples/*
 *.pml
  
 .agents
+
+# Local design reference
+/DESIGN.md

@@ -1,0 +1,19 @@
+:root {
+  --dp-color-chassis: #cbd0d2;
+  --dp-color-raised: #e7eaeb;
+  --dp-color-well: #b6bec2;
+  --dp-color-ink: #181e22;
+  --dp-color-label: #414b52;
+  --dp-color-field: #20272b;
+  --dp-color-on-field: #f2f4f4;
+  --dp-color-on-field-muted: #d8dee1;
+  --dp-color-accent: #f15b22;
+  --dp-typography-sans: 'Industrial Host', sans-serif;
+  --dp-typography-mono: 'Industrial Plex', monospace;
+  --dp-spacing-column-gap: 25px;
+  --dp-spacing-compact-gap: 12px;
+  --dp-radius-key: 4px;
+  --dp-radius-panel: 8px;
+  --dp-radius-chassis: 14px;
+  --dp-motion-key: 140ms;
+}

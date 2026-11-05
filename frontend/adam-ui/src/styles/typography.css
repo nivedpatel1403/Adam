@@ -1,0 +1,4 @@
+@font-face { font-family: 'Industrial Host'; src: url('/fonts/HostGrotesk-Regular.woff2') format('woff2'); font-weight: 400; font-display: swap; }
+@font-face { font-family: 'Industrial Display'; src: url('/fonts/IBMPlexSans-SemiBold.woff2') format('woff2'); font-weight: 600; font-display: swap; }
+@font-face { font-family: 'Industrial Plex'; src: url('/fonts/IBMPlexMono-Regular.woff2') format('woff2'); font-weight: 400; font-display: swap; }
+@font-face { font-family: 'Industrial Plex'; src: url('/fonts/IBMPlexMono-SemiBold.woff2') format('woff2'); font-weight: 600; font-display: swap; }

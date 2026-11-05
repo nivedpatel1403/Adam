@@ -112,12 +112,13 @@ class VBoxCommandError(VMOperationError):
 class VirtualBoxClient:
     """Thin async wrapper around the VBoxManage CLI. See module docstring for error-handling design."""
 
-    def __init__(self, vboxmanage_path: str = "VBoxManage") -> None:
+    def __init__(self, vboxmanage_path: str = "VBoxManage", *, default_command_timeout: float | None = None) -> None:
         if vboxmanage_path == "VBoxManage" and not shutil.which("VBoxManage"):
             default_win_path = Path("C:/Program Files/Oracle/VirtualBox/VBoxManage.exe")
             if default_win_path.exists():
                 vboxmanage_path = str(default_win_path)
         self._vboxmanage_path = vboxmanage_path
+        self._default_command_timeout = default_command_timeout
 
     # ------------------------------------------------------------------ #
     # internal
@@ -144,6 +145,7 @@ class VirtualBoxClient:
         best-effort output capture.
         """
         command = (self._vboxmanage_path, *args)
+        timeout = timeout if timeout is not None else self._default_command_timeout
         start = time.monotonic()
         try:
             proc = await asyncio.create_subprocess_exec(
@@ -183,6 +185,11 @@ class VirtualBoxClient:
                 stderr=f"timed out after {timeout}s and was killed",
                 termination_reason=decode_ntstatus(-1),  # always None; kept for consistency
             )
+        except asyncio.CancelledError:
+            if proc.returncode is None:
+                proc.kill()
+            await proc.wait()
+            raise
 
         duration_ms = (time.monotonic() - start) * 1000
         return_code = proc.returncode if proc.returncode is not None else -1
