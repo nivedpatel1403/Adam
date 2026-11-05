@@ -32,6 +32,29 @@ class VerificationWorkload {
             });
             httpChild.WaitForExit();
             if (httpChild.ExitCode != 0) throw new Exception("Benign HTTP child failed");
+            // The first request exposes the URL to live detection. The rule and
+            // Windows proxy are installed asynchronously, so launch a fresh
+            // client only after that configuration is visible in the treatment.
+            if (cycle == "2") {
+                bool proxyReady = false;
+                for (int i = 0; i < 60 && !proxyReady; i++) {
+                    using (var key = Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Internet Settings")) {
+                        proxyReady = key != null && Convert.ToInt32(key.GetValue("ProxyEnable", 0)) == 1 &&
+                            Convert.ToString(key.GetValue("ProxyServer", "")).Contains("192.168.19.2");
+                    }
+                    if (!proxyReady) Thread.Sleep(1000);
+                }
+                if (!proxyReady) throw new Exception("Treatment proxy was not configured");
+                string retry = "$response = Invoke-WebRequest -UseBasicParsing -Uri '" + c2Url +
+                    "' -TimeoutSec 10; $body = if ($response.Content -is [byte[]]) { [Text.Encoding]::UTF8.GetString($response.Content) } else { [string]$response.Content }; [IO.File]::WriteAllText('" + responseFile + "', $body)";
+                var retryChild = Process.Start(new ProcessStartInfo(
+                    Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), @"WindowsPowerShell\v1.0\powershell.exe"),
+                    "-NoProfile -NonInteractive -Command \"" + retry + "\"") {
+                    UseShellExecute = false, CreateNoWindow = true
+                });
+                retryChild.WaitForExit();
+                if (retryChild.ExitCode != 0) throw new Exception("Treatment HTTP retry failed");
+            }
             for (int i = 0; i < 3; i++) {
                 var request = (HttpWebRequest)WebRequest.Create("http://192.168.19.2:18080/" + marker);
                 request.Proxy = null;
