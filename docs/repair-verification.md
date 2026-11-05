@@ -2,6 +2,12 @@
 
 **Overall status: verification is in progress. Guest installation is complete, but the real pipeline and snapshot promotion have not passed.**
 
+## Analysis throughput repair — November 5
+
+The retained Procmon export exposed a detection flood: ordinary `System32` file paths and the `HKLM\System` registry tree matched the bare word `system` as a privilege-escalation indicator. The detector no longer scores that generic substring and retains explicit escalation indicators. A regression checks ordinary paths and an explicit escalation command.
+
+The fusion engine now indexes correlation groups and caches detector scores and compact detection signatures. Comparison tests cover the previous full-window algorithm, expiration, out-of-order events, detector extensions, and signature-cache reset. An isolated replay of **all 253,189 retained Procmon records completed in 64.846 seconds** (`logs/repair-verification/20261104-211334/fusion-volume-profile.json`). This replay does not include the event bus, database, or guest, so the real VM pipeline, two restore cycles, controlled failures, and promotion remain unverified.
+
 ## Latest pipeline finding — November 5, 01:46 host time
 
 Revision `e39556a` passed **515 tests with one skipped** in both environments, Ruff, dependency checks, and guest manifest verification. Build `a02fad5c6023a1fc` was deployed successfully; its actual functional capture and all deployed hashes passed before candidate `ae0298c8-c59c-46d0-a02c-d700e40c0633` was created. The original recovery `b15f95bb-d463-444f-9019-c7dd966a7d90` remains preserved.

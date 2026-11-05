@@ -31,12 +31,12 @@ class PrivilegeEscalationDetector(BaseDetector):
         "uac bypass",
         "runas",
         "schtasks /create",
+        r"nt authority\system",
     ]
 
     WEAK_INDICATORS: ClassVar[dict[str, str]] = [
         "elevate",
         "admin",
-        "system",
         "bypass uac",
     ]
 
