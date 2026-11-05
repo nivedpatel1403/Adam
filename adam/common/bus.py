@@ -238,10 +238,19 @@ class EventBus:
         shutdown" convention (ARCHITECTURE.md section 14.4).
         """
         all_subscribers = [s for subs in self._subscribers.values() for s in subs]
-        joins = [subscriber.queue.join() for subscriber in all_subscribers]
-        if joins:
+        async def drain_cascades() -> None:
+            while True:
+                await asyncio.gather(*(subscriber.queue.join() for subscriber in all_subscribers))
+                # A downstream queue may have joined before an upstream
+                # handler published to it. Recheck unfinished work after all
+                # queues have joined; queue.empty() alone misses handlers
+                # that are still processing an item.
+                if all(subscriber.queue._unfinished_tasks == 0 for subscriber in all_subscribers):
+                    return
+
+        if all_subscribers:
             try:
-                await asyncio.wait_for(asyncio.gather(*joins), timeout=timeout)
+                await asyncio.wait_for(drain_cascades(), timeout=timeout)
             except TimeoutError:
                 self.errors.append("Event bus drain timed out with messages pending")
                 logger.warning(

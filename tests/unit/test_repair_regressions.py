@@ -1,29 +1,28 @@
 import asyncio
-from datetime import datetime, timezone
+from datetime import UTC, datetime
+from io import StringIO
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
-from io import StringIO
 
 import pytest
 
-from adam.contracts.enums import Category, Source
-from adam.contracts.raw_event import RawEvent
-from adam.orchestrator.session import SessionOrchestrator
-from adam.orchestrator.persistence import RawEventWriter
 from adam.common.bus import EventBus
 from adam.common.config import Settings
+from adam.contracts.enums import Category, SessionStatus, Source
+from adam.contracts.raw_event import RawEvent
 from adam.contracts.session import SampleRef, SessionLifecycle
-from adam.contracts.enums import SessionStatus
 from adam.db.writer import DBWriter
-from adam.sandbox.guest.agent.agent import ToolAvailability
+from adam.orchestrator.persistence import RawEventWriter
+from adam.orchestrator.session import SessionOrchestrator
 from adam.sandbox.controller import SandboxController
+from adam.sandbox.guest.agent.agent import ToolAvailability
 from adam.sandbox.state import SandboxOperationError, SandboxState
-from scripts.verify_candidate_snapshots import promote_candidate_to_clean
 from scripts import verify_candidate_snapshots as harness
+from scripts.verify_candidate_snapshots import promote_candidate_to_clean
 
 
 def event():
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     return RawEvent(event_id="test", session_id="test", source=Source.SYSMON,
                     source_event_id=1, category=Category.PROCESS,
                     occurred_at=now, observed_at=now)
@@ -158,11 +157,38 @@ async def test_database_shutdown_is_bounded_and_keeps_uncommitted_events():
     db = SimpleNamespace(commit=AsyncMock(), rollback=AsyncMock())
     writer = DBWriter(db, EventBus())
     writer.event_repo.create_raw = AsyncMock(side_effect=OSError("disk full"))
-    writer.queue.append(SimpleNamespace(payload=event()))
+    writer._enqueue(SimpleNamespace(payload=event()))
     with pytest.raises(RuntimeError, match="three retries"):
         await writer.stop()
     assert len(writer.queue) == 1
     assert writer.event_repo.create_raw.await_count == 3
+
+
+@pytest.mark.asyncio
+async def test_bus_drain_waits_for_cascaded_inflight_handlers():
+    bus = EventBus()
+    received = []
+
+    async def upstream(_):
+        await asyncio.sleep(0.01)
+        await bus.publish(SimpleNamespace(payload=1))
+
+    async def middle(_):
+        await asyncio.sleep(0.01)
+        await bus.publish(SimpleNamespace(payload=1.0))
+
+    async def downstream(_):
+        await asyncio.sleep(0.01)
+        received.append('complete')
+
+    bus.subscribe(str, upstream, name='upstream')
+    bus.subscribe(int, middle, name='middle')
+    bus.subscribe(float, downstream, name='downstream')
+    await bus.start()
+    await bus.publish(SimpleNamespace(payload='start'))
+    await bus.drain(timeout=1)
+    assert received == ['complete']
+    assert not bus.errors
 
 
 @pytest.mark.asyncio

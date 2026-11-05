@@ -31,7 +31,6 @@ class CollectionDetector(BaseDetector):
         "downloads",
         "finance",
         "confidential",
-        "backup",
         "archive",
     ]
 
@@ -44,6 +43,32 @@ class CollectionDetector(BaseDetector):
     ]
 
     SCORE_THRESHOLD = 6
+
+    def score_events(self, events: list[RawEvent]) -> tuple[int, list[RawEvent]]:
+        """Score file paths and commands, excluding unrelated diagnostic detail.
+
+        Procmon's detail field includes ordinary Windows access flags such as
+        "Open For Backup". Registry paths such as Control Panel\\Desktop are
+        also not evidence of collecting a user's desktop files.
+        """
+        matched = []
+        total = 0
+        for event in events:
+            if event.event_type == "REGISTRY":
+                continue
+            payload = event.payload or {}
+            searchable = " ".join(str(value).lower() for value in (
+                event.process_name or "", event.command_line or "",
+                payload.get("command_line", ""), payload.get("TargetFilename", ""),
+                payload.get("path", ""),
+            ))
+            score = 5 * any(term in searchable for term in self.STRONG_INDICATORS)
+            score += 3 * any(term in searchable for term in self.MEDIUM_INDICATORS)
+            score += 2 * any(term in searchable for term in self.WEAK_INDICATORS)
+            if score:
+                total += score
+                matched.append(event)
+        return total, matched
 
     def match(self, events: list[RawEvent]) -> list[RawEvent] | None:
 

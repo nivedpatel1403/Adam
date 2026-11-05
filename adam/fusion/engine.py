@@ -31,6 +31,7 @@ _SCORED_DETECTORS = frozenset({
     LateralMovementDetector, PrivilegeEscalationDetector,
 })
 _ALL_CANDIDATES_MATCH = (_SCORED_DETECTORS - {CommandAndControlDetector}) | {ReconDetector, PersistenceDetector}
+_BUILTIN_DETECTORS = _SCORED_DETECTORS | {ReconDetector, PersistenceDetector}
 
 
 @dataclass
@@ -78,6 +79,7 @@ class EventFusionEngine:
         self._signature_generation = 0
         self._groups: dict[int | None, _Group] = {}
         self._indexed_detectors = tuple(self.registry)
+        self._has_custom_detectors = False
         self._window_generation = self.window.clear_generation
         self._sequence = 0
 
@@ -91,7 +93,10 @@ class EventFusionEngine:
         searchable = None
         for detector in detectors:
             detector_type = type(detector)
-            if detector_type in _SCORED_DETECTORS:
+            if detector_type is CollectionDetector:
+                score, _ = detector.score_events([event])
+                include = bool(score)
+            elif detector_type in _SCORED_DETECTORS:
                 if searchable is None:
                     process = (event.process_name or "").lower()
                     payload = " ".join(str(value).lower() for value in event.payload.values())
@@ -152,6 +157,7 @@ class EventFusionEngine:
         if detectors != self._indexed_detectors or self.window.clear_generation != self._window_generation:
             self._groups.clear()
             self._indexed_detectors = detectors
+            self._has_custom_detectors = any(type(detector) not in _BUILTIN_DETECTORS for detector in detectors)
             self._window_generation = self.window.clear_generation
             for event in self.window.get_events():
                 self._index_event(event)
@@ -213,14 +219,14 @@ class EventFusionEngine:
         semantic_events = []
 
         for _, group in groups:
-            if not group.dirty and group.signature_generation == self._signature_generation:
+            if not group.dirty and group.signature_generation == self._signature_generation and not self._has_custom_detectors:
                 continue
             evaluated_generation = self._signature_generation
             group.dirty = False
 
             for detector in self.registry:
 
-                if detector not in group.cached:
+                if detector not in group.cached or type(detector) not in _BUILTIN_DETECTORS:
                     candidate_items = group.candidates.get(detector, ())
                     indexed_match = False
                     if type(detector) in _SCORED_DETECTORS and type(detector) is not CommandAndControlDetector:

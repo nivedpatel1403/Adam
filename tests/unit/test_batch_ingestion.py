@@ -8,13 +8,14 @@ from unittest.mock import AsyncMock
 import pytest
 
 from adam.collectors.base import BaseCollector
+from adam.collectors.sysmon import SysmonCollector
 from adam.common.bus import EventBus
 from adam.common.config import Settings
 from adam.contracts.enums import Category, SessionStatus, Source
 from adam.contracts.raw_event import RawEvent
 from adam.contracts.session import SampleRef
 from adam.orchestrator.persistence import RawEventWriter
-from adam.orchestrator.session import SessionOrchestrator
+from adam.orchestrator.session import SessionOrchestrator, build_collectors_from_telemetry
 from adam.sandbox.guest.agent.agent import TelemetryArtifacts, ToolAvailability
 
 
@@ -33,6 +34,36 @@ class ExportSource(BaseCollector):
         for number in range(self.total):
             await self._emit_wait(event(number))
         self.read_complete.set()
+
+
+@pytest.mark.asyncio
+async def test_exported_sysmon_is_read_once_while_live_collector_keeps_polling(monkeypatch):
+    exported = build_collectors_from_telemetry(
+        'batch-test', TelemetryArtifacts(sysmon_evtx_path='static.evtx')
+    )[0]
+    live = SysmonCollector('live.evtx', session_id='batch-test', poll_interval=0.001)
+    reads = {'static': 0, 'live': 0}
+
+    def read(name):
+        reads[name] += 1
+        return []
+
+    monkeypatch.setattr(exported, '_read_current_records', lambda: read('static'))
+    monkeypatch.setattr(live, '_read_current_records', lambda: read('live'))
+    await exported.start()
+    await live.start()
+    try:
+        await asyncio.wait_for(exported.read_complete.wait(), timeout=1)
+        for _ in range(100):
+            if reads['live'] >= 2:
+                break
+            await asyncio.sleep(0.001)
+        assert reads['static'] == 1
+        assert reads['live'] >= 2
+        assert exported._task.done()
+    finally:
+        await exported.stop()
+        await live.stop()
 
 
 @pytest.mark.asyncio

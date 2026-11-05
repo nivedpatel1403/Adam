@@ -90,9 +90,12 @@ class SQLiteEventRepository(IEventRepository):
         return events
 
     async def create_semantic(self, event: SemanticEvent) -> None:
-        await self.db.execute(
+        await self.create_semantic_many([event])
+
+    async def create_semantic_many(self, events: list[SemanticEvent]) -> None:
+        await self.db.executemany(
             "INSERT OR IGNORE INTO semantic_events (semantic_id, session_id, correlation_id, intent, confidence, window_start, caused_by_mutation, payload) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (
+            [(
                 event.semantic_id,
                 event.session_id,
                 event.correlation_id,
@@ -101,7 +104,7 @@ class SQLiteEventRepository(IEventRepository):
                 event.window_start.isoformat(),
                 event.caused_by_mutation,
                 event.model_dump_json()
-            )
+            ) for event in events]
         )
 
     async def get_semantic_by_session(self, session_id: str) -> list[SemanticEvent]:
@@ -117,9 +120,12 @@ class SQLiteDecisionRepository(IDecisionRepository):
         self.db = db
 
     async def create(self, decision: PolicyDecision) -> None:
-        await self.db.execute(
+        await self.create_many([decision])
+
+    async def create_many(self, decisions: list[PolicyDecision]) -> None:
+        await self.db.executemany(
             "INSERT OR IGNORE INTO policy_decisions (decision_id, session_id, correlation_id, triggered_by, rule_id, verdict, decided_at, payload) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (
+            [(
                 decision.decision_id,
                 decision.session_id,
                 decision.correlation_id,
@@ -128,7 +134,7 @@ class SQLiteDecisionRepository(IDecisionRepository):
                 decision.verdict.value if hasattr(decision.verdict, "value") else str(decision.verdict),
                 decision.decided_at.isoformat(),
                 decision.model_dump_json()
-            )
+            ) for decision in decisions]
         )
 
     async def get_by_session(self, session_id: str) -> list[PolicyDecision]:
@@ -144,9 +150,12 @@ class SQLiteMutationRepository(IMutationRepository):
         self.db = db
 
     async def create(self, mutation: MutationResult) -> None:
-        await self.db.execute(
+        await self.create_many([mutation])
+
+    async def create_many(self, mutations: list[MutationResult]) -> None:
+        await self.db.executemany(
             "INSERT OR IGNORE INTO mutations (mutation_id, session_id, correlation_id, decision_id, status, applied_at, payload) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (
+            [(
                 mutation.mutation_id,
                 mutation.session_id,
                 mutation.correlation_id,
@@ -154,7 +163,7 @@ class SQLiteMutationRepository(IMutationRepository):
                 mutation.status.value if hasattr(mutation.status, "value") else str(mutation.status),
                 mutation.applied_at.isoformat(),
                 mutation.model_dump_json()
-            )
+            ) for mutation in mutations]
         )
 
     async def get_by_session(self, session_id: str) -> list[MutationResult]:

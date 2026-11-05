@@ -5,9 +5,12 @@ from random import Random
 
 from adam.fusion.correlate import EventCorrelator
 from adam.fusion.detectors.base import BaseDetector
+from adam.fusion.detectors.collection import CollectionDetector
+from adam.fusion.detectors.impact import ImpactDetector
 from adam.fusion.detectors.privilege_escalation import PrivilegeEscalationDetector
 from adam.fusion.detectors.registry import DetectorRegistry
 from adam.fusion.engine import EventFusionEngine
+from adam.fusion.mapping import map_detection_to_intent
 from adam.fusion.models import RawEvent, SemanticEvent
 from adam.fusion.normalise import EventNormalizer
 from adam.fusion.window import SlidingWindow
@@ -75,6 +78,15 @@ class CustomDetector(BaseDetector):
         return SemanticEvent(matched[0].timestamp, 'custom', 'T0', 'LOW', 1, 'custom', matched)
 
 
+class StatefulDetector(CustomDetector):
+    def __init__(self):
+        self.calls = 0
+
+    def match(self, events):
+        self.calls += 1
+        return events if self.calls >= 2 else None
+
+
 def test_custom_detectors_and_window_clear_rebuild_the_index():
     now = datetime.now(UTC)
     engine = EventFusionEngine(10)
@@ -87,6 +99,14 @@ def test_custom_detectors_and_window_clear_rebuild_the_index():
     result = engine.process([RawEvent(now, 'x', 'file', process_id=1)])
     assert not any(d.category == 'custom' for d in result.detections)
     assert result.correlated_groups == 1
+
+
+def test_stateful_extension_is_called_again_for_an_unchanged_group():
+    engine = EventFusionEngine(10)
+    engine.registry.register(StatefulDetector())
+    event = RawEvent(datetime.now(UTC), 'x', 'file', process_id=1)
+    assert not engine.process([event]).detections
+    assert any(item.category == 'custom' for item in engine.process([]).detections)
 
 
 def test_mixed_scored_groups_match_full_window_through_repeated_expiration():
@@ -126,6 +146,33 @@ def test_system_paths_alone_are_not_privilege_escalation_indicators():
     assert detector.match([suspicious]) == [suspicious]
 
 
+def test_collection_ignores_backup_access_flags_and_desktop_registry_configuration():
+    now = datetime.now(UTC)
+    detector = CollectionDetector()
+    ordinary = [
+        RawEvent(now, 'procmon', 'FILE', process_name='MsMpEng.exe',
+                 payload={'path': r'C:\Windows\System32\drivers\PROCMON24.SYS',
+                          'detail': 'Open For Backup'}),
+        RawEvent(now, 'procmon', 'REGISTRY', process_name='conhost.exe',
+                 payload={'path': r'HKCU\Control Panel\Desktop'}),
+    ]
+    assert detector.match(ordinary * 5) is None
+    suspicious = RawEvent(now, 'sysmon', 'PROCESS', process_name='robocopy.exe',
+                          command_line=r'robocopy C:\Users\alice\Documents C:\staging')
+    assert detector.match([suspicious]) == [suspicious]
+
+
+def test_ordinary_information_queries_do_not_count_as_disk_formatting():
+    now = datetime.now(UTC)
+    detector = ImpactDetector()
+    ordinary = RawEvent(now, 'procmon', 'FILE', process_name='Sysmon64.exe',
+                        payload={'operation': 'QueryBasicInformationFile'})
+    assert detector.match([ordinary] * 5) is None
+    suspicious = RawEvent(now, 'sysmon', 'PROCESS', process_name='cmd.exe',
+                          payload={'command_line': 'bcdedit & format C:'})
+    assert detector.match([suspicious]) == [suspicious]
+
+
 def test_signature_cache_reset_rechecks_unchanged_groups():
     now = datetime.now(UTC)
     engine, reference = EventFusionEngine(10), ReferenceFusion()
@@ -143,3 +190,16 @@ def test_signature_cache_reset_rechecks_unchanged_groups():
         actual = engine.process(deepcopy(batch))
         _, expected = reference.process(deepcopy(batch))
         assert representation(actual.detections) == representation(expected)
+
+
+def test_fixed_intent_mapping_does_not_scan_large_evidence():
+    from types import SimpleNamespace
+
+    class UnreadableEvidence:
+        def __iter__(self):
+            raise AssertionError('Evidence is unnecessary for this technique')
+
+    for technique, expected in [('T1071', 'C2_BEACON'), ('T1547', 'PERSIST_RUN_KEY'),
+                                ('T1005', 'RECON_USER_ARTIFACTS')]:
+        detection = SimpleNamespace(technique_id=technique, evidence=UnreadableEvidence())
+        assert map_detection_to_intent(detection)[0] == expected

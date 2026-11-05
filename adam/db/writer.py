@@ -7,6 +7,7 @@ Subscribes to the EventBus and writes records to SQLite in batches.
 import asyncio
 import logging
 from collections import deque
+from itertools import groupby
 from typing import Any
 
 import aiosqlite
@@ -42,6 +43,7 @@ class DBWriter:
         self.flush_interval_s = flush_interval_s
         
         self.queue: deque[Envelope[Any]] = deque()
+        self._queued_raw_events = 0
         self.item_added = asyncio.Event()
         self.task: asyncio.Task[None] | None = None
         self.dropped_raw_events = 0
@@ -58,16 +60,18 @@ class DBWriter:
         if len(self.queue) >= self.max_queue_size:
             # Shedding: try to shed a low-value RawEvent from the left of the queue
             shed = False
-            for i in range(len(self.queue)):
-                if isinstance(self.queue[i].payload, RawEvent):
-                    del self.queue[i]
-                    self.dropped_raw_events += 1
-                    logger.warning(
-                        "QueueOverflow: Shed low-value RawEvent to make room in DBWriter queue. Total dropped: %d",
-                        self.dropped_raw_events
-                    )
-                    shed = True
-                    break
+            if self._queued_raw_events:
+                for i in range(len(self.queue)):
+                    if isinstance(self.queue[i].payload, RawEvent):
+                        del self.queue[i]
+                        self._queued_raw_events -= 1
+                        self.dropped_raw_events += 1
+                        logger.warning(
+                            "QueueOverflow: Shed low-value RawEvent to make room in DBWriter queue. Total dropped: %d",
+                            self.dropped_raw_events
+                        )
+                        shed = True
+                        break
             
             if not shed:
                 # If we couldn't shed a RawEvent, and this incoming event is a RawEvent, drop it.
@@ -89,6 +93,8 @@ class DBWriter:
             self._overflow_warned = False
         
         self.queue.append(envelope)
+        if isinstance(envelope.payload, RawEvent):
+            self._queued_raw_events += 1
         self.item_added.set()
 
     async def _handler(self, envelope: Envelope[Any]) -> None:
@@ -135,22 +141,27 @@ class DBWriter:
             
         batch = []
         while self.queue and len(batch) < self.batch_size:
-            batch.append(self.queue.popleft())
+            envelope = self.queue.popleft()
+            if isinstance(envelope.payload, RawEvent):
+                self._queued_raw_events -= 1
+            batch.append(envelope)
             
         if not batch:
             return
             
         try:
-            for env in batch:
-                payload = env.payload
+            for payload_type, group in groupby(batch, key=lambda env: type(env.payload)):
+                payloads = [env.payload for env in group]
+                payload = payloads[0]
                 if isinstance(payload, RawEvent):
-                    await self.event_repo.create_raw(payload)
+                    for item in payloads:
+                        await self.event_repo.create_raw(item)
                 elif isinstance(payload, SemanticEvent):
-                    await self.event_repo.create_semantic(payload)
+                    await self.event_repo.create_semantic_many(payloads)
                 elif isinstance(payload, PolicyDecision):
-                    await self.decision_repo.create(payload)
+                    await self.decision_repo.create_many(payloads)
                 elif isinstance(payload, MutationResult):
-                    await self.mutation_repo.create(payload)
+                    await self.mutation_repo.create_many(payloads)
                 elif type(payload).__name__ == "SessionLifecycle":
                     pass
             await self.db.commit()
@@ -161,6 +172,8 @@ class DBWriter:
             # Push the uncommitted batch back to the front of the queue to retry
             for item in reversed(batch):
                 self.queue.appendleft(item)
+                if isinstance(item.payload, RawEvent):
+                    self._queued_raw_events += 1
             if not getattr(self, "_commit_warned", False):
                 logger.warning("DBWriter batch commit delayed (retrying in next interval).")
                 self._commit_warned = True

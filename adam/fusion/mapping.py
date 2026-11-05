@@ -12,17 +12,19 @@ def map_detection_to_intent(detection: Any) -> tuple[str, str, str]:
     Dynamically maps a fusion engine detection to a specific policy intent, tactic, and technique.
     """
     tid = getattr(detection, "technique_id", "T1082")
+    if tid == "T1071":
+        return ("C2_BEACON", "TA0011", "T1071")
+    if tid == "T1547":
+        return ("PERSIST_RUN_KEY", "TA0003", "T1547")
+    if tid not in ("T1003", "T1562", "T1082"):
+        return ("RECON_USER_ARTIFACTS", "TA0007", str(tid))
     evidence = getattr(detection, "evidence", [])
     evidence_text = " ".join(
         (getattr(ev, "command_line", "") or "") + " " + (getattr(ev, "process_name", "") or "")
         for ev in evidence
     ).lower()
 
-    if tid == "T1071":
-        return ("C2_BEACON", "TA0011", "T1071")
-    elif tid == "T1547":
-        return ("PERSIST_RUN_KEY", "TA0003", "T1547")
-    elif tid == "T1003":
+    if tid == "T1003":
         if "wallet" in evidence_text or "exodus" in evidence_text or "crypto" in evidence_text:
             return ("CRED_WALLET_SEARCH", "TA0006", "T1003")
         else:

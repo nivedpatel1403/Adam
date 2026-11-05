@@ -154,6 +154,7 @@ def build_collectors_from_telemetry(
                 artifacts.sysmon_evtx_path,
                 session_id=session_id,
                 watermark_record_id=watermark_record_id,
+                single_pass=True,
             )
         )
     if artifacts.procmon_csv_path is not None:

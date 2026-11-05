@@ -2,6 +2,12 @@
 
 **Overall status: verification is in progress. Guest installation is complete, but the real pipeline and snapshot promotion have not passed.**
 
+## Full ingestion replay — November 5, 10:39 host time
+
+The subsequent real control run (`pipeline-fusion.json`) again timed out during Procmon ingestion. Profiling found that the completed Sysmon export was repeatedly rescanned, and that a full database queue was repeatedly searched for raw events even though this pipeline stores those events in JSONL. Exported Sysmon now reads once; live Sysmon still polls. Database queue bookkeeping avoids unnecessary scans, and SQLite writes adjacent records in batches with rollback and retry. Event-bus drain now waits for cascading downstream handlers. Focused regressions cover these paths and stateful custom detectors.
+
+Two further false indicators were narrowed: ordinary Windows backup-access flags and Desktop registry settings no longer count as file collection, and `information` no longer matches disk `format`. Positive command tests remain. An offline replay of the retained real Sysmon, Procmon, and network exports through the actual collectors, event bus, fusion/policy engines, and SQLite writer completed in **84.385 seconds**, with 243,059 durable raw events and no reported drops. An independent audit counted all **241,161** Procmon CSV records, verified contiguous source IDs, and matched **9,112** semantic and decision rows (`full-ingestion-profile.json`, `full-ingestion-audit.json`). This is not a new VM run: both restore cycles, controlled failures, application acceptance, and promotion remain outstanding.
+
 ## Analysis throughput repair — November 5
 
 The retained Procmon export exposed a detection flood: ordinary `System32` file paths and the `HKLM\System` registry tree matched the bare word `system` as a privilege-escalation indicator. The detector no longer scores that generic substring and retains explicit escalation indicators. A regression checks ordinary paths and an explicit escalation command.

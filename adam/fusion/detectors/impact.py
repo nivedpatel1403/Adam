@@ -36,7 +36,9 @@ class ImpactDetector(BaseDetector):
         "rename",
         "overwrite",
         "wipe",
-        "format",
+        "format ",
+        "format.exe",
+        "format.com",
     ]
 
     SCORE_THRESHOLD = 6

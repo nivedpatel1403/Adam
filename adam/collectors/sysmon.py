@@ -63,6 +63,7 @@ class SysmonCollector(BaseCollector):
         poll_interval: float = 0.1,
         buffer_size: int = 10000,
         watermark_record_id: int | None = None,
+        single_pass: bool = False,
     ) -> None:
         super().__init__(buffer_size=buffer_size)
         self._evtx_path = evtx_path
@@ -70,6 +71,7 @@ class SysmonCollector(BaseCollector):
         self._poll_interval = poll_interval
         self._watermark_record_id: int | None = watermark_record_id
         self._last_record_id: int | None = watermark_record_id
+        self._single_pass = single_pass
 
     @property
     def source_name(self) -> str:
@@ -158,4 +160,6 @@ class SysmonCollector(BaseCollector):
 
             self._last_record_id = highest_seen
             self.read_complete.set()
+            if self._single_pass:
+                return
             await asyncio.sleep(self._poll_interval)
