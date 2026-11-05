@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
+import aiosqlite
 import pytest
 
 from adam.common.config import DatabaseSettings, SandboxSettings, Settings
@@ -13,7 +14,6 @@ from adam.contracts.session import AnalysisSession, SampleRef, SessionConfig, Se
 from adam.orchestrator import runner as runner_module
 from adam.orchestrator.runner import GuestRuntime, Runner
 from adam.pipeline.wiring import EngineHandles
-
 
 SAMPLE = SampleRef(
     sha256="a" * 64,
@@ -75,10 +75,10 @@ class FakeOrchestrator:
     async def run_session(self, sample, settings, **kwargs):
         if self.fail:
             raise RuntimeError("simulated session failure")
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         return AnalysisSession(
             session_id=kwargs["session_id"],
-            experiment_id=f"exp_{kwargs['session_id']}",
+            experiment_id=kwargs["experiment_id"],
             arm=kwargs["arm"],
             sample=sample,
             config=SessionConfig(
@@ -198,3 +198,22 @@ async def test_runner_without_interceptor_is_unchanged(monkeypatch, tmp_path) ->
 
     assert session.arm is Arm.TREATMENT
     assert channel.closed is True
+
+
+@pytest.mark.asyncio
+async def test_final_session_experiment_id_matches_database_and_artifact(monkeypatch, tmp_path) -> None:
+    import json
+
+    from adam.db.schema import SCHEMA_SQL
+
+    settings = _settings(tmp_path)
+    async with aiosqlite.connect(settings.db.path) as db:
+        await db.executescript(SCHEMA_SQL)
+    _patch_runner(monkeypatch, GuestRuntime(channel=FakeChannel(), interceptor=None))
+    session = await Runner(settings=settings).run('sample.exe', arm=Arm.CONTROL, artifacts_dir=str(tmp_path))
+    artifact = json.loads((tmp_path / session.session_id / 'session.json').read_text())
+    async with (aiosqlite.connect(settings.db.path) as db,
+                db.execute('SELECT payload FROM sessions WHERE session_id=?', (session.session_id,)) as cursor):
+        stored = json.loads((await cursor.fetchone())[0])
+    assert session.experiment_id == 'exp_sess_phase2'
+    assert stored == artifact == session.model_dump(mode='json')

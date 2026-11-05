@@ -428,6 +428,7 @@ class Runner:
                 settings,
                 host_sample_path=host_sample_path,
                 session_id=session_id,
+                experiment_id=metadata.experiment_id,
                 arm=experiment.arm,
                 deception_enabled=experiment.deception_enabled,
                 sample_timeout_seconds=sample_timeout_seconds,
