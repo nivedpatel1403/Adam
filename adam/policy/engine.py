@@ -91,6 +91,22 @@ class PolicyEngine(IPolicyEngine):
                 f"{self._global_confidence_gate:.2f}"),
             )
 
+        if rule.action == "FABRICATE_C2_RESPONSE":
+            # A skipped primitive cannot use a response budget before an
+            # actionable endpoint has actually been observed. Match the
+            # parameter precedence used below when building the decision.
+            params = dict(rule.parameters)
+            endpoint = event.features.get("network_endpoint")
+            if endpoint:
+                params.setdefault("target_url", endpoint)
+                params.setdefault("c2_url", endpoint)
+            target = params.get("target_url") or params.get("c2_url")
+            if not target or not str(target).startswith(("http://", "https://")):
+                return (
+                    Verdict.SUPPRESSED_CONFLICT,
+                    "No observed HTTP C2 endpoint; response budget remains available",
+                )
+
         remaining = context.budget_remaining(rule.rule_id, rule.budget.max_per_session)
         if remaining <= 0:
             return (

@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from adam.contracts.enums import Verdict
 from adam.contracts.semantic_event import SemanticEvent
 from adam.deception.primitives.network_lures import FabricateC2Response
 from adam.policy.context import SessionContext
@@ -33,6 +34,22 @@ def test_rule_023_uses_observed_network_endpoint() -> None:
     assert len(fired) == 1
     assert fired[0].parameters["target_url"] == "http://198.51.100.7:8080/beacon"
     assert fired[0].parameters["c2_url"] == "http://198.51.100.7:8080/beacon"
+
+
+@pytest.mark.parametrize('missing_endpoint', [None, '192.168.19.2:18080', 'ftp://example.test/file'])
+def test_unusable_c2_endpoint_does_not_consume_budget(missing_endpoint) -> None:
+    engine = PolicyEngine(str(RULES_DIR), global_confidence_gate=0.60)
+    event = _c2_event()
+    context = SessionContext(session_id=event.session_id)
+    event.features['network_endpoint'] = missing_endpoint
+    first = next(d for d in engine.evaluate(event, context) if d.rule_id == 'RULE-023')
+    assert first.verdict is Verdict.SUPPRESSED_CONFLICT
+    assert first.action is None
+    assert 'budget remains available' in first.rationale
+    event.features['network_endpoint'] = 'http://192.168.19.2:18080/marker/c2'
+    second = next(d for d in engine.evaluate(event, context) if d.rule_id == 'RULE-023')
+    assert second.verdict is Verdict.EXECUTE
+    assert second.parameters['target_url'] == event.features['network_endpoint']
 
 
 @pytest.mark.asyncio

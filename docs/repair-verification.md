@@ -2,6 +2,12 @@
 
 **Overall status: verification is in progress. Guest installation is complete, but the real pipeline and snapshot promotion have not passed.**
 
+## Updated candidate restore cycles — November 5, 11:52 host time
+
+After the signed Defender platform update, candidate `4d3f4a15-5567-474f-96e5-208537a5ce4f` passed functional capture, guest manifest verification, cleanup, and normal shutdown (`candidate-defender.json`). The original `clean` recovery `b15f95bb-d463-444f-9019-c7dd966a7d90` remains intact.
+
+The real two-cycle verifier (`pipeline-defender.json`) completed both sessions, correlated process/file/registry/network markers in all required sources, observed live Sysmon, and proved the file and registry reset witness disappeared after restore. The treatment session applied two decoy mutations and reported skips, but its C2-effect check failed: an earlier endpoint-less C2 detection consumed the one-action budget, so the later observed workload URL was suppressed. Promotion was disabled. The policy now records a conflict suppression without consuming that budget when an HTTP endpoint is unavailable; regression tests cover missing, non-HTTP, and subsequently valid endpoints. A replay of the actual treatment decisions selected the workload's observed URL as its first actionable C2 target (`c2-real-evidence-replay.json`); this is not yet proof of a live fabricated response. Both restore cycles must be repeated on the new code, followed by the controlled failures and application checks.
+
 ## Real control capture and witness crash — November 5, 10:43 host time
 
 Revision `46a4fe3` completed the control session `sess_2026_11_05_08d2938e`. The verifier correlated its unique process, file, registry and network markers with real Sysmon, Procmon and packet records, including a persisted live Sysmon event while the process was running. Its artifact contains 326,897 Procmon records, 2,688 Sysmon records and 482 network records. Independent counting matched every Procmon CSV record, found no duplicate source IDs, and matched 13,513 semantic and policy-decision rows to session metrics. The audit also exposed an experiment-ID mismatch between the artifact and SQLite; Runner now passes the same experiment ID to the orchestrator, with a regression comparing the final object, artifact and database record. The older session remains evidence of the original mismatch.
