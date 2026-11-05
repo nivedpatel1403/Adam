@@ -2,6 +2,8 @@
 
 **Adaptive Deception Sandbox for Advanced Malware Analysis**
 
+> Original design specification. Phase labels and future-tense statements describe the design baseline, not current completion. Start with the [documentation index](docs/README.md), [frontend verification](docs/frontend-verification.md), and [known limitations](docs/known_limitations.md) for implementation status and operating boundaries.
+
 | Field | Value |
 |---|---|
 | Document version | 1.0 |

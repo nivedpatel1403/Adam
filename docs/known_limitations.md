@@ -1,6 +1,12 @@
 # ADAM System: Known Limitations & Operational Boundaries
 
-This document lists the known architectural and operational limitations of the ADAM automated malware analysis and dynamic deception system, along with their resolution status following the implementation plan.
+Operating boundaries as of November 6, 2026. Read the [documentation index](README.md), [historical live acceptance](repair-verification.md), and [latest frontend verification](frontend-verification.md) together: a passing historical run is not a current health assertion.
+
+## Startup reliability and current health
+
+**Open.** The November 5 acceptance recorded successful real control/treatment cycles and promotion of snapshot `4d3f4a15-5567-474f-96e5-208537a5ce4f`. During the November 6 frontend checks, VirtualBox state queries timed out before a new run could launch. The UI displays unavailable status and disables live launch. No new sample ran during that retest, and final powered-off/pristine health was not established then.
+
+Guest readiness has a separate configurable deadline from the workload. A longer deadline alone does not establish readiness. The API's read-only status commands have five-second deadlines and clean up their own stalled query processes; this does not resolve general VirtualBox or boot reliability.
 
 ---
 
@@ -28,12 +34,12 @@ This document lists the known architectural and operational limitations of the A
 ---
 
 ### 3. Procmon & Tshark Telemetry in Golden Image
-- **Status**: **OPEN — standardized source paths; guest capture still requires live verification**
+- **Status**: **Historically verified November 5; current VM health unverified**
 - **Root Cause**: The legacy guest snapshot (`disk-resized-36gb-c-drive`) lacked `Procmon64.exe` and `tshark.exe` at standardized paths.
 - **Resolution**:
-  - One recovery snapshot named `clean` is preserved. Its existence does not prove current telemetry capabilities.
+  - The November 5 acceptance recorded one promoted snapshot named `clean`, UUID `4d3f4a15-5567-474f-96e5-208537a5ce4f`. The older recovery snapshot was deleted through guarded promotion. This dated inventory does not establish today's VM state.
   - Standardized the Procmon path on `C:\ADAM\Tools\Procmon\Procmon64.exe` across guest configuration, installer defaults, provisioning scripts, and host configurations.
-  - Signed Wireshark and Npcap installers were staged on the host during the November 4 repair. Successful guest installation and packet capture have not yet been established.
+  - The November 5 control/treatment cycles established readable Procmon and network exports and workload correlation. The November 6 frontend task did not repeat that live proof because state queries failed before launch.
   - Added automated guest provisioning script `scripts/provision_guest_tools.ps1` and verification harness `scripts/verify_candidate_snapshots.py`.
   - Added `tool_availability` caching to `HTTPGuestChannel` and updated `start_captures()` to gracefully skip missing tools when running with non-strict configuration.
   - Added `tools_required` configuration flag in `config/default.toml` and `adam/common/config.py` (default: `false` for graceful degradation; `true` for strict fail-fast mode).
@@ -47,7 +53,13 @@ This document lists the known architectural and operational limitations of the A
 - **Resolution**:
   - `adam/cli/benchmark.py` now wires `EventBus`, `EventFusionEngine`, `PolicyEngine`, and `DeceptionEngine` via `wire_engines()` for both Control (`dry_run=True`) and Treatment (`dry_run=False`) arms.
   - Event counts, decision counts, and primitive plausibility records are read from real pipeline executions.
-  - **Still heuristic**: `yield_score` is a formula over mutation/semantic counts, and an empty-corpus plausibility fallback still exists. Neither is a measured exploitation metric. Phase 5 of the remediation plan replaces these with an honest measurement methodology.
+  - **Still heuristic**: `yield_score` is a formula over mutation/semantic counts, and an empty-corpus plausibility fallback still exists. Neither is a measured exploitation metric or evidence of general detection effectiveness.
   - Added integration test `tests/integration/test_benchmark_real_engines.py` verifying real engine execution, input-sensitive metrics, and treatment yield advantage.
+
+## Deployment and evidence availability
+
+The React console is the primary interface; Streamlit remains a legacy option. Localhost development, stored sessions, and selected Chromium flows were checked. Production authentication, reverse-proxy deployment, other browsers, and a fresh real treatment run were not verified in the frontend task.
+
+VM images, sample executables, local databases, raw captures, and verification logs are excluded from Git. Published screenshots show historical real evidence or explicitly synthetic results. They are not substitutes for reproducing live acceptance on a provisioned host.
 
 

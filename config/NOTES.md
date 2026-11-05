@@ -1,6 +1,8 @@
 # Sandbox snapshot lineage and maintenance
 
-## Current baseline: one snapshot (2026-11-03)
+> Historical maintenance notes. The November 3 baseline below was superseded by the [November 5 acceptance](../docs/repair-verification.md), which recorded promotion of `4d3f4a15-5567-474f-96e5-208537a5ce4f`. The [November 6 frontend check](../docs/frontend-verification.md) subsequently encountered state-query timeouts and did not establish current VM health. Local backup paths and logs below are historical references, not files provided by this repository.
+
+## Historical baseline: one snapshot (2026-11-03; superseded)
 
 Only `clean` remains, UUID `b15f95bb-d463-444f-9019-c7dd966a7d90`.
 It is the previously tested `disk-resized-36gb-c-drive` snapshot, renamed after

@@ -1,19 +1,21 @@
 # ADAM analysis console
 
-React/TypeScript frontend for the existing local ADAM API. The visual contract is [DESIGN.md](../../DESIGN.md). It uses locally bundled fonts, gray instrument panels, dark status readouts, orange actions, and responsive navigation.
+The primary ADAM interface: a React/TypeScript console for live analysis, recorded evidence, simulation, and paired comparison. It uses locally bundled fonts, gray instrument panels, dark status readouts, orange actions, and responsive navigation.
+
+[Project overview](../../README.md) · [Documentation](../../docs/README.md) · [Verification status](../../docs/frontend-verification.md)
 
 ## Run locally
 
-From the repository root, start the API in one PowerShell terminal:
+Install the Python backend and create local settings using the [root quick start](../../README.md#quick-start). Use Node.js 22.12+ (Node.js 24 LTS is also supported). From the repository root, start the API in one PowerShell terminal:
 
 ```powershell
 .\.venv\Scripts\python.exe -m uvicorn adam.api.main:app --host 127.0.0.1 --port 8000
 ```
 
-In a second terminal:
+In a second terminal, initially at the repository root:
 
 ```powershell
-cd "C:\Works\Major Project\ADAM-code\Nived\Adam\frontend\adam-ui"
+cd frontend/adam-ui
 npm ci
 npm run dev -- --host 127.0.0.1
 ```
@@ -22,7 +24,7 @@ Open http://127.0.0.1:5173. The development server proxies `/api` to port 8000. 
 
 ## Use
 
-- **Console:** select the genuine built-in `smoke_sample.exe` or upload a real file (up to 64 MiB). Control is the default. Treatment must be selected explicitly. Launch returns the real Runner session ID.
+- **Console:** select `smoke_sample.exe` if present locally, or upload a real file (up to 64 MiB). Executables are not distributed in Git. Control is the default. Treatment must be selected explicitly. Launch returns the real Runner session ID.
 - **Sessions:** search/filter the database archive, inspect paginated behavioral events, decisions, mutations, source capture outcomes, and structured failures. Export retained capture files and reports. Missing evidence stays missing.
 - **Simulation:** generate deterministic synthetic sessions or paired experiments. These are explicitly labeled and do not execute uploaded seeds in the VM. Synthetic replay is also labeled separately.
 - **Comparison:** inspect actual control/treatment records and observed deltas; no malware verdict is invented.

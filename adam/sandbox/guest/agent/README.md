@@ -2,13 +2,15 @@
 
 This directory holds two conceptually different things that happen to share a name:
 
+[Documentation index](../../../../docs/README.md) · [Guest setup](../../../../docs/guest-provisioning-guide.md) · [Verification status](../../../../docs/frontend-verification.md)
+
 ## `agent.py` — host-side, GuestControl-based (the "compatibility backend")
 
 A Python class (`GuestAgent`) that runs **on the host**, driving VirtualBox's `VBoxManage
 guestcontrol` to shell commands into the guest. Wrapped by `VBoxGuestChannel`
 (`adam/sandbox/guest/vbox_channel.py`) to satisfy the `GuestChannel` interface
-(`adam/sandbox/guest/channel.py`). Selected by `guest_backend = "vbox"` (the default) in
-`config/default.toml`. Fully operational, kept as-is — see its own module docstring for its
+(`adam/sandbox/guest/channel.py`). Selected explicitly by `guest_backend = "vbox"`;
+the committed configuration now selects `"http"`. Kept as a compatibility backend — see its own module docstring for its
 extensive diagnostics/bug-fix history.
 
 ## `adam_agent.ps1` + `modules/*.psm1` — guest-resident (the target architecture)
@@ -17,7 +19,7 @@ A PowerShell 5.1 HTTP service that runs **inside the guest VM**, exposing the RE
 documented in `docs/phase5-http-agent-api.md`. Talked to from the host via `HTTPGuestChannel`
 (`adam/sandbox/guest/http_channel.py`), selected by `guest_backend = "http"`.
 
-This is not Python/FastAPI — see `docs/phase5-migration-guide.md` for why: ARCHITECTURE.md's
+This is not Python/FastAPI: ARCHITECTURE.md's
 own constraint C4 ("The guest agent is PowerShell 5.1 compatible. No .NET Core assumption") rules
 out installing a Python runtime into the guest image, so this implementation uses PowerShell
 5.1's built-in `System.Net.HttpListener` instead.
@@ -28,10 +30,11 @@ out installing a Python runtime into the guest image, so this implementation use
 automatically. See `install.ps1`'s own docstring for the one-time setup steps, and re-capture the
 VM's `clean` snapshot afterward so the setup survives every session's snapshot restore.
 
-**Not executed against a real Windows guest as part of the change that added this file** — no
-Windows/PowerShell runtime was available in the environment that wrote it. Reviewed carefully
-against documented PowerShell 5.1 / .NET Framework APIs, but treat it as unverified until run on
-a real VM.
+**Verification history:** this README originally described an untested deployment. The
+[November 5 acceptance](../../../../docs/repair-verification.md) subsequently recorded real
+guest execution and capture. The [November 6 frontend retest](../../../../docs/frontend-verification.md)
+was blocked before launch by VirtualBox state-query timeouts. Validate your own deployment;
+historical acceptance does not establish current health.
 
 | | `agent.py` | `adam_agent.ps1` / `modules/` |
 |---|---|---|

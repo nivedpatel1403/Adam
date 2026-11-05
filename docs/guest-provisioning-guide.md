@@ -2,6 +2,35 @@
 
 Keep the Windows guest on its host-only network. Stage installers on the host, validate publisher signatures, record SHA-256 hashes, and transfer the verified files with the agent package.
 
+[Documentation index](README.md) · [Current limitations](known_limitations.md) · [Dated acceptance](repair-verification.md)
+
+## Configure a new local environment
+
+The repository contains agent source and provisioning utilities, not a Windows VM, tool installers, credentials, configured snapshot, or sample executables. Use a Windows guest you control and obtain the required tooling separately. The [agent README](../adam/sandbox/guest/agent/README.md) documents installation.
+
+After the [root installation steps](../README.md#quick-start), create the gitignored `config/development.toml` from your environment's actual values. `ADAM_ENV` defaults to `development`. Credentials belong in `.env`, not TOML; use `ADAM__SANDBOX__GUEST_USERNAME`, `ADAM__SANDBOX__GUEST_PASSWORD`, and `ADAM__HTTP_GUEST__AUTH_TOKEN`.
+
+```toml
+guest_backend = "http"
+
+[sandbox]
+vm_name = "Your Windows VM"
+snapshot_name = "clean"
+guest_ready_timeout_s = 900.0
+
+[http_guest]
+host = "192.168.56.101" # example only: replace with the guest host-only IP
+port = 8765
+tools_required = true
+
+[network]
+host_ip = "192.168.56.1" # example only: replace with the host-only adapter IP
+```
+
+Use a baseline you have actually verified; the name `clean` alone proves nothing. The guest readiness example above is independent of the CLI workload timeout and is not a claim of successful startup. The committed default is 300 seconds; the November 6 frontend host used a 420-second local override. Do not copy verification-host UUIDs or addresses as your own configuration.
+
+Provision the HTTP agent and capture tools, confirm agent health and normal shutdown, and follow the candidate acceptance process below before treating a baseline as usable. Only one API, CLI, or harness should control the VM at a time. The [latest frontend check](frontend-verification.md) was blocked by VirtualBox state-query timeouts; the November 5 acceptance is historical evidence.
+
 Default paths:
 
 - `procmon_path = "C:\\ADAM\\Tools\\Procmon\\Procmon64.exe"`
@@ -10,7 +39,9 @@ Default paths:
 
 The Procmon executable is `C:\ADAM\Tools\Procmon\Procmon64.exe`.
 
-## Complete the staged repair
+## Historical staged repair — November 4, 2026
+
+The commands in this section describe a past host-specific repair handoff, not fresh-clone setup or current instructions. That repair's successful acceptance was recorded on [November 5](repair-verification.md); later state-query failures are recorded in [frontend verification](frontend-verification.md). Local evidence directories and temporary shares mentioned below are not distributed.
 
 For the current repair execution, the user has already completed the Npcap wizard and installation. Do not rerun the installer solely because older instructions appear below. The remaining work is automated capture, restoration, failure handling, and baseline verification. Consult `repair-verification.md` for current results. The commands below document the earlier installation handoff.
 
