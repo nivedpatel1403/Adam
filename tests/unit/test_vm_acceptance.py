@@ -1,4 +1,5 @@
 import hashlib
+import asyncio
 import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -13,6 +14,18 @@ from scripts.vm_acceptance import (
     markers_match,
     validate_acceptance,
 )
+
+
+@pytest.mark.asyncio
+async def test_readiness_deadline_bounds_an_unresponsive_request():
+    async def stalled():
+        await asyncio.sleep(60)
+
+    channel = SimpleNamespace(get_version=stalled, get_health=AsyncMock())
+    assert await asyncio.wait_for(
+        harness.wait_for_guest_ready(channel, timeout_s=0.02, poll_interval_s=1), timeout=1
+    ) is False
+    channel.get_health.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -31,8 +44,10 @@ async def test_failed_witness_planting_blocks_restore_proof(monkeypatch):
     monkeypatch.setattr(harness, 'check_markers', AsyncMock(return_value={'file_present':False,'reg_present':False}))
     monkeypatch.setattr(harness, 'plant_markers', AsyncMock(return_value=False))
     monkeypatch.setattr(harness, 'stop_vm_cleanly', AsyncMock(return_value=True))
-    result = await harness.prepare_reset_witness(client, object(), 'vm', 'candidate')
+    channel = object()
+    result = await harness.prepare_reset_witness(client, channel, 'vm', 'candidate', ready_timeout_s=731)
     assert result['success'] is False
+    harness.wait_for_guest_ready.assert_awaited_once_with(channel, timeout_s=731)
 
 
 @pytest.mark.asyncio

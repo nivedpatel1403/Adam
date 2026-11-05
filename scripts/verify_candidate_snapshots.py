@@ -121,8 +121,9 @@ async def wait_for_guest_ready(
     start = time.monotonic()
     while (time.monotonic() - start) < timeout_s:
         try:
-            ver = await channel.get_version()
-            health = await channel.get_health()
+            async with asyncio.timeout(max(0.001, timeout_s - (time.monotonic() - start))):
+                ver = await channel.get_version()
+                health = await channel.get_health()
             if ver and health and getattr(health, "status", None) == "ok":
                 ver_str = getattr(ver, "agent_version", None) or (ver.get("agent_version") if isinstance(ver, dict) else str(ver))
                 uptime = getattr(health, "uptime_s", 0.0) or 0.0
@@ -133,7 +134,7 @@ async def wait_for_guest_ready(
                 return True
         except Exception as exc:  # noqa: BLE001
             logger.debug("Guest agent not ready yet: %s", exc)
-        await asyncio.sleep(poll_interval_s)
+        await asyncio.sleep(min(poll_interval_s, max(0, timeout_s - (time.monotonic() - start))))
     return False
 
 
@@ -145,7 +146,7 @@ async def plant_markers(channel, marker_file: str, reg_path: str, marker_val: st
     return await write_markers(channel, marker_file, reg_path, marker_val)
 
 
-async def prepare_reset_witness(vbox, channel, vm_name: str, candidate_uuid: str) -> dict:
+async def prepare_reset_witness(vbox, channel, vm_name: str, candidate_uuid: str, ready_timeout_s=900) -> dict:
     """Plant and read back a witness AFTER Runner has finished its restoration."""
     witness = {"success": False, "candidate_uuid": candidate_uuid, "token": uuid.uuid4().hex,
                "file": RESET_FILE, "registry": RESET_KEY}
@@ -153,7 +154,7 @@ async def prepare_reset_witness(vbox, channel, vm_name: str, candidate_uuid: str
         if await vbox.get_state(vm_name) != "poweroff":
             raise RuntimeError("Reset witness requires completed, powered-off Runner teardown")
         started = await vbox.start(vm_name, headless=True)
-        if not started.success or not await wait_for_guest_ready(channel):
+        if not started.success or not await wait_for_guest_ready(channel, timeout_s=ready_timeout_s):
             raise RuntimeError("Could not boot current state for reset witness")
         if not markers_absent(await check_markers(channel, RESET_FILE, RESET_KEY)):
             raise RuntimeError("Reset witness was already present or unreadable")
@@ -249,7 +250,7 @@ async def current_disk_fingerprint(vbox, vm_name: str) -> dict:
 
 async def run_verification_cycle(
     vbox, channel, vm_name: str, snapshot_name: str, cycle_index: int,
-    prior_marker_file=None, prior_reg_path=None, ready_timeout_s=300,
+    prior_marker_file=None, prior_reg_path=None, ready_timeout_s=900,
     reset_witness=None, evidence_root=None,
 ) -> dict:
     """Verify the actual Runner restore/boot, without a redundant preflight boot."""
@@ -279,7 +280,7 @@ async def run_verification_cycle(
     compiler = Path(os.environ["WINDIR"]) / "Microsoft.NET/Framework64/v4.0.30319/csc.exe"
     settings = get_settings().model_copy(deep=True)
     settings.sandbox.snapshot_name = snapshot_name
-    settings.sandbox.guest_ready_timeout_s = max(ready_timeout_s, settings.sandbox.guest_ready_timeout_s)
+    settings.sandbox.guest_ready_timeout_s = ready_timeout_s
     settings.http_guest.tools_required = True
     settings.http_guest.tshark_interface = "auto"
     settings.network.host = settings.network.host_ip = "192.168.19.2"
@@ -507,7 +508,7 @@ async def promote_candidate_to_clean(
     return promotion
 
 
-async def verify_final_baseline(vbox, channel, vm_name, candidate_uuid) -> dict:
+async def verify_final_baseline(vbox, channel, vm_name, candidate_uuid, ready_timeout_s=900) -> dict:
     result = {"success": False, "snapshot_uuid": candidate_uuid}
     try:
         if not await stop_vm_cleanly(vbox, vm_name):
@@ -516,7 +517,7 @@ async def verify_final_baseline(vbox, channel, vm_name, candidate_uuid) -> dict:
         if not restored.success:
             raise RuntimeError(restored.stderr)
         started = await vbox.start(vm_name, headless=True)
-        if not started.success or not await wait_for_guest_ready(channel):
+        if not started.success or not await wait_for_guest_ready(channel, timeout_s=ready_timeout_s):
             raise RuntimeError("Final baseline did not boot with a healthy agent")
         expected = json.loads((_PROJECT_ROOT / "adam/sandbox/guest/agent/build_manifest.json").read_text(encoding="utf-8"))["build_id"]
         if (await channel.get_version()).build_id != expected:
@@ -551,6 +552,7 @@ async def _run_harness(args: argparse.Namespace) -> int:
     candidate_snap = args.candidate_snapshot
     recovery_snap = args.recovery_snapshot
     guest_url = args.guest_url or settings.http_guest.base_url
+    ready_timeout_s = getattr(args, "guest_ready_timeout", 900)
 
     vbox = VirtualBoxClient()
     def _create_channel() -> HTTPGuestChannel:
@@ -594,7 +596,8 @@ async def _run_harness(args: argparse.Namespace) -> int:
     channel1 = _create_channel()
     try:
         cycle1 = await run_verification_cycle(
-            vbox, channel1, vm_name, target_candidate, cycle_index=1, evidence_root=output_path.parent
+            vbox, channel1, vm_name, target_candidate, cycle_index=1, evidence_root=output_path.parent,
+            ready_timeout_s=ready_timeout_s,
         )
     finally:
         await channel1.aclose()
@@ -604,13 +607,14 @@ async def _run_harness(args: argparse.Namespace) -> int:
     try:
         cycle2 = {"cycle": 2, "error": "Cycle one did not pass"}
         if all(cycle1.get(key) is True for key in required_checks):
-            reset_witness = await prepare_reset_witness(vbox, channel2, vm_name, target_candidate)
+            reset_witness = await prepare_reset_witness(vbox, channel2, vm_name, target_candidate, ready_timeout_s)
             if reset_witness["success"]:
                 cycle2 = await run_verification_cycle(
                     vbox, channel2, vm_name, target_candidate, cycle_index=2,
                     prior_marker_file="C:\\ADAM\\run_marker_1.txt",
                     prior_reg_path="HKLM\\Software\\ADAM\\Cycle1",
                     reset_witness=reset_witness, evidence_root=output_path.parent,
+                    ready_timeout_s=ready_timeout_s,
                 )
             else:
                 cycle2 = {"cycle": 2, "error": "Reset witness could not be established"}
@@ -623,7 +627,7 @@ async def _run_harness(args: argparse.Namespace) -> int:
     if cycles_passed:
         channel = _create_channel()
         try:
-            pre_promotion_health = await verify_final_baseline(vbox, channel, vm_name, target_candidate)
+            pre_promotion_health = await verify_final_baseline(vbox, channel, vm_name, target_candidate, ready_timeout_s)
             cycles_passed = pre_promotion_health["success"]
         finally:
             await channel.aclose()
@@ -641,7 +645,7 @@ async def _run_harness(args: argparse.Namespace) -> int:
         if promotion_result.get("success"):
             channel = _create_channel()
             try:
-                promotion_result["final_health"] = await verify_final_baseline(vbox, channel, vm_name, target_candidate)
+                promotion_result["final_health"] = await verify_final_baseline(vbox, channel, vm_name, target_candidate, ready_timeout_s)
                 promotion_result["success"] = promotion_result["final_health"]["success"]
             finally:
                 await channel.aclose()
@@ -711,6 +715,8 @@ def main() -> None:
     parser.add_argument("--output-file", default=str(DEFAULT_OUTPUT_FILE), help="Output result JSON file")
     parser.add_argument("--vdi-path", default=str(DEFAULT_VDI_PATH), help="Path to orphan 4 GiB VDI")
     parser.add_argument("--acceptance-file", help="Candidate/revision/build-bound evidence record required for promotion")
+    parser.add_argument("--guest-ready-timeout", type=float, default=900,
+                        help="Guest boot/readiness deadline in seconds, separate from workload execution (default: 900)")
     parser.add_argument(
         "--guest-url",
         default="http://192.168.19.102:8765",
@@ -724,6 +730,8 @@ def main() -> None:
     )
 
     args = parser.parse_args()
+    if not 0 < args.guest_ready_timeout <= 3600:
+        parser.error("--guest-ready-timeout must be greater than zero and at most 3600 seconds")
     rc = asyncio.run(run_harness(args))
     sys.exit(rc)
 

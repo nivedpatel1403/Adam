@@ -47,7 +47,7 @@ async def read_session(settings, session_id):
         return await SQLiteSessionRepository(connection).get_by_id(session_id)
 
 
-def run_case(case: str, candidate: str, output: Path) -> dict:
+def run_case(case: str, candidate: str, output: Path, ready_timeout_s: float = 900) -> dict:
     output.mkdir(parents=True, exist_ok=False)
     sample = output / ('ADAM_VERIFY_CYCLE_1_' + case + '.exe')
     compile_sample(sample, sleeper=case == 'timeout')
@@ -56,6 +56,7 @@ def run_case(case: str, candidate: str, output: Path) -> dict:
         compile_sample(sentinel, sleeper=True)
     settings = get_settings().model_copy(deep=True)
     settings.sandbox.snapshot_name = candidate
+    settings.sandbox.guest_ready_timeout_s = ready_timeout_s
     settings.http_guest.tools_required = True
     settings.http_guest.tshark_interface = 'auto'
     settings.live.enabled = True
@@ -161,7 +162,10 @@ def main():
     parser.add_argument('--candidate', required=True)
     parser.add_argument('--output-dir', type=Path, required=True)
     parser.add_argument('--case', choices=['missing_tool', 'polling', 'timeout', 'export'])
+    parser.add_argument('--guest-ready-timeout', type=float, default=900)
     args = parser.parse_args()
+    if not 0 < args.guest_ready_timeout <= 3600:
+        parser.error('--guest-ready-timeout must be greater than zero and at most 3600 seconds')
     args.output_dir.mkdir(parents=True, exist_ok=True)
     logging.basicConfig(level=logging.WARNING, filename=args.output_dir / 'failures.log')
     server = ThreadingHTTPServer(('192.168.19.2', 18080), VerificationHTTPHandler)
@@ -170,7 +174,7 @@ def main():
     results = []
     try:
         for case in ([args.case] if args.case else ['missing_tool', 'polling', 'timeout', 'export']):
-            result = run_case(case, args.candidate, args.output_dir / case)
+            result = run_case(case, args.candidate, args.output_dir / case, args.guest_ready_timeout)
             results.append(result)
             print(json.dumps({'case':case,'success':result['success'],'session_id':result.get('session',{}).get('session_id')}), flush=True)
             if not result['success']:
