@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from itertools import count
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -165,6 +166,30 @@ async def test_wiring_does_not_inflate_confidence() -> None:
     received = await _publish_raw(bus, _raw_event())
     assert len(received) == 1
     assert received[0].confidence == pytest.approx(0.55)
+
+
+@pytest.mark.asyncio
+async def test_semantic_ids_preserve_uuid_entropy_when_prefixes_collide(monkeypatch) -> None:
+    serial = count(1)
+    monkeypatch.setattr(uuid, "uuid4", lambda: uuid.UUID(int=(0x994D7525 << 96) + next(serial)))
+    bus = EventBus()
+    wire_engines(bus, fusion=FakeFusion(_detection()), policy=FakePolicy(), deception=FakeDeception())
+    received = []
+
+    async def capture(env):
+        received.append(env.payload)
+
+    bus.subscribe(SemanticEvent, capture, name="capture_unique_semantics")
+    await bus.start()
+    try:
+        for _ in range(2):
+            await bus.publish(_raw_envelope(_raw_event()))
+        await bus.drain(1.0)
+        assert len(received) == 2
+        assert len({event.semantic_id for event in received}) == 2
+        assert all(len(event.semantic_id.split("_")[1]) == 32 for event in received)
+    finally:
+        await bus.shutdown()
 
 
 @pytest.mark.asyncio

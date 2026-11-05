@@ -252,7 +252,7 @@ def wire_engines(
                 handles.semantic_events_post_mutation += 1
 
             se = SemanticEvent(
-                semantic_id=f"sem_{uuid.uuid4().hex[:8]}_{idx:03d}",
+                semantic_id=f"sem_{uuid.uuid4().hex}_{idx:03d}",
                 session_id=env.session_id,
                 correlation_id=env.correlation_id,
                 intent=intent,
