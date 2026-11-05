@@ -189,7 +189,7 @@ async def test_semantic_ids_preserve_uuid_entropy_when_prefixes_collide(monkeypa
         assert len({event.semantic_id for event in received}) == 2
         assert all(len(event.semantic_id.split("_")[1]) == 32 for event in received)
     finally:
-        await bus.shutdown()
+        await bus.drain(1.0)
 
 
 @pytest.mark.asyncio
