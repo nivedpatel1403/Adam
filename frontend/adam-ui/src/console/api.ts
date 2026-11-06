@@ -8,7 +8,7 @@ export interface Page<T> { items: T[]; total: number; next_offset: number | null
 export interface Sample { id: string; filename: string; size_bytes: number; sha256: string }
 export interface Sandbox {
   vm_state: string; agent_healthy: boolean; current_snapshot: string; vm_name: string;
-  profile: string; busy: boolean; error: string | null; readiness_timeout_seconds: number;
+  profile: string; busy: boolean; error: string | null; agent_error?: string | null; readiness_timeout_seconds: number;
 }
 export interface Summary extends ArchiveItem {
   counts: { events: number; decisions: number; mutations: number };

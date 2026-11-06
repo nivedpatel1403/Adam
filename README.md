@@ -106,8 +106,8 @@ The live pipeline uses an asynchronous event bus. Synthetic modes exercise analy
 ADAM is a research prototype, not a production-ready security service.
 
 - **Historical live acceptance — November 5, 2026:** controlled real-VM cycles recorded correlated Sysmon, Procmon, and network evidence, restoration checks, and guarded baseline promotion. See the [dated acceptance report](docs/repair-verification.md).
-- **Frontend verification — November 6, 2026:** 543 backend tests passed with one skip; 5 component tests and 8 browser checks passed. The production build and relevant lint checks passed. These are dated results, not live CI badges.
-- **Latest live retest:** blocked before launch by VirtualBox state-query timeouts. Startup reliability remains unresolved; the historical acceptance does not establish current VM health.
+- **Console repair and verification — November 6, 2026:** 546 backend tests passed with one skip; 6 component tests and 10 browser checks passed. The production build and relevant lint checks passed. These are dated results, not live CI badges.
+- **Latest live retest:** after recovering a stalled VirtualBox management process, a frontend-launched control run completed with exit code zero and correlated Sysmon, Procmon, and network evidence. Normal shutdown/restore completed. See the [console launch repair](docs/console-launch-repair.md). Startup remains slow and resource-dependent; this host uses a separate 900-second readiness allowance.
 - **Network deception:** a bounded plain-HTTP lure proxy supports clients that use it. HTTPS/CONNECT, TLS pinning, raw sockets, and clients bypassing proxy settings are outside that proof.
 
 See [frontend verification](docs/frontend-verification.md) and [known limitations](docs/known_limitations.md) for scope and evidence availability. Raw verification logs and captures remain local and are not published with the source.

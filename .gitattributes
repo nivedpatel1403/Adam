@@ -1,0 +1,4 @@
+# Preserve the exact deployed guest bytes bound to build_manifest.json.
+adam/sandbox/guest/agent/*.ps1 text eol=crlf
+adam/sandbox/guest/agent/modules/*.psm1 text eol=crlf
+adam/sandbox/guest/agent/sysmon.xml text eol=lf

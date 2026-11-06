@@ -32,6 +32,8 @@ Open http://127.0.0.1:5173. The development server proxies `/api` to port 8000. 
 
 Live sessions use bounded SSE updates plus canonical polling and durable database results. Workload timeout is separate from the configured guest-readiness timeout. VM/agent failures are displayed; startup reliability remains a separate backend task. Only one API-owned VM operation is allowed at a time. Do not run an independent CLI/harness against the same VM concurrently.
 
+If a management status check fails, **Retry status** rechecks VirtualBox; changing the workload timeout does not repair that failure. During normal guest startup the console shows an active operation and an agent that is not ready yet. The [November 6 repair](../../docs/console-launch-repair.md) completed a real control launch using a separate 900-second local readiness allowance. That run took about 10 minutes including boot, capture processing, and cleanup.
+
 ## Verify
 
 ```powershell

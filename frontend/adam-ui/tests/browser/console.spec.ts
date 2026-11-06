@@ -124,3 +124,27 @@ test('retained evidence downloads and a disappeared file shows a recoverable err
   await expect(page.getByRole('alert').filter({ hasText: 'Download unavailable (404)' })).toBeVisible();
   await expect(page.locator('.session-strip')).toContainText('Completed');
 });
+
+test('a failed sandbox probe can recover through the visible retry control', async ({ page }) => {
+  let unavailable = true;
+  let launches = 0;
+  page.on('request', request => { if (request.method() === 'POST' && request.url().includes('/sessions/live')) launches++; });
+  await page.route('**/api/v1/sandbox/status', route => route.fulfill({ json: { vm_state: unavailable ? 'unknown' : 'Off', agent_healthy: false, current_snapshot: 'clean', vm_name: 'Windows', profile: 'Windows', busy: false, error: unavailable ? 'Management query timed out' : null, readiness_timeout_seconds: 900 } }));
+  await page.goto('/');
+  await expect(page.getByRole('alert')).toContainText('Management query timed out');
+  await expect(page.getByRole('button', { name: 'Launch analysis', exact: true })).toBeDisabled();
+  unavailable = false;
+  await page.getByRole('button', { name: 'Retry sandbox status' }).click();
+  await expect(page.getByRole('alert')).not.toBeVisible();
+  await expect(page.getByRole('button', { name: 'Launch analysis', exact: true })).toBeEnabled();
+  expect(launches).toBe(0);
+});
+
+test('guest startup shows an active operation without inventing a management failure', async ({ page }) => {
+  await page.route('**/api/v1/sandbox/status', route => route.fulfill({ json: { vm_state: 'Running', agent_healthy: false, agent_error: 'Guest agent is starting', current_snapshot: 'clean', vm_name: 'Windows', profile: 'Windows', busy: true, error: null, readiness_timeout_seconds: 900 } }));
+  await page.goto('/');
+  await expect(page.getByRole('banner', { name: 'System status' })).toContainText('Analysis active');
+  await expect(page.getByRole('banner', { name: 'System status' })).toContainText('Not ready');
+  await expect(page.getByRole('alert')).not.toBeVisible();
+  await expect(page.getByRole('button', { name: 'Launch analysis', exact: true })).toBeDisabled();
+});

@@ -110,7 +110,7 @@ function SessionView({ id }: { id: string }) {
 }
 
 function Lifecycle({ session, phase }: { session: AnalysisSession; phase?: string }) {
-  const state = phase || session.status.toLowerCase().replaceAll('_', ' ');
+  const state = !terminal(session.status) && phase ? phase : session.status.toLowerCase().replaceAll('_', ' ');
   const entries = [`Started · ${time(session.started_at)}`, state.charAt(0).toUpperCase() + state.slice(1)];
   if (session.ended_at) entries.push(`Ended · ${time(session.ended_at)}`);
   return <Panel title="Lifecycle"><ol className="lifecycle">{entries.map((label, index) => <li key={index} className="reached"><span aria-hidden="true"/>{label}</li>)}</ol></Panel>;

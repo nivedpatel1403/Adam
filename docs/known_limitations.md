@@ -4,7 +4,7 @@ Operating boundaries as of November 6, 2026. Read the [documentation index](READ
 
 ## Startup reliability and current health
 
-**Open.** The November 5 acceptance recorded successful real control/treatment cycles and promotion of snapshot `4d3f4a15-5567-474f-96e5-208537a5ce4f`. During the November 6 frontend checks, VirtualBox state queries timed out before a new run could launch. The UI displays unavailable status and disables live launch. No new sample ran during that retest, and final powered-off/pristine health was not established then.
+**Resource-dependent; not universally resolved.** The November 5 acceptance recorded successful real control/treatment cycles and promotion of snapshot `4d3f4a15-5567-474f-96e5-208537a5ce4f`. Initial November 6 frontend checks were blocked by state-query timeouts. The later [console launch repair](console-launch-repair.md) recovered the idle management process and completed a real control run, followed by normal shutdown and restoration of the original baseline. A preceding attempt exceeded a 420-second readiness limit; the host now uses a separate 900-second allowance. Slow or failed startup under other host loads remains possible.
 
 Guest readiness has a separate configurable deadline from the workload. A longer deadline alone does not establish readiness. The API's read-only status commands have five-second deadlines and clean up their own stalled query processes; this does not resolve general VirtualBox or boot reliability.
 
@@ -39,7 +39,7 @@ Guest readiness has a separate configurable deadline from the workload. A longer
 - **Resolution**:
   - The November 5 acceptance recorded one promoted snapshot named `clean`, UUID `4d3f4a15-5567-474f-96e5-208537a5ce4f`. The older recovery snapshot was deleted through guarded promotion. This dated inventory does not establish today's VM state.
   - Standardized the Procmon path on `C:\ADAM\Tools\Procmon\Procmon64.exe` across guest configuration, installer defaults, provisioning scripts, and host configurations.
-  - The November 5 control/treatment cycles established readable Procmon and network exports and workload correlation. The November 6 frontend task did not repeat that live proof because state queries failed before launch.
+  - The November 5 control/treatment cycles established readable Procmon and network exports and workload correlation. A later November 6 frontend-launched control run also verified all three sources and sample PID correlation; a fresh treatment run was not repeated in that repair.
   - Added automated guest provisioning script `scripts/provision_guest_tools.ps1` and verification harness `scripts/verify_candidate_snapshots.py`.
   - Added `tool_availability` caching to `HTTPGuestChannel` and updated `start_captures()` to gracefully skip missing tools when running with non-strict configuration.
   - Added `tools_required` configuration flag in `config/default.toml` and `adam/common/config.py` (default: `false` for graceful degradation; `true` for strict fail-fast mode).

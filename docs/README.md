@@ -32,11 +32,12 @@ The legacy Streamlit dashboard is an optional interface; installation and startu
 | Record | Interpretation |
 | --- | --- |
 | [Known limitations](known_limitations.md) | Current operating boundaries and unresolved startup reliability. |
+| [November 6 console launch repair](console-launch-repair.md) | Subsequent real frontend-launched control run, correlated evidence, and normal cleanup. |
 | [November 6 frontend verification](frontend-verification.md) | Passing browser/component checks and a fresh live run blocked before launch. |
 | [November 5 repair acceptance](repair-verification.md) | Historical real-VM acceptance and promotion, not a current health assertion. |
 | [Snapshot lineage](../config/NOTES.md) | Historical maintenance notes; older sections are superseded by the dated acceptance report. |
 | [October 26 audit](audit/baseline-2026-10-26.md) | Historical audit baseline. |
 
-The latest frontend checks used implementation commit `c284feb`. During those checks, VirtualBox stopped answering state queries and no fresh live detonation was started. Earlier successful real captures remain valid historical evidence; neither screenshots nor synthetic comparisons establish current VM health.
+The initial frontend checks used implementation commit `c284feb` and were blocked from fresh execution by VirtualBox state-query timeouts. The subsequent console launch repair recovered the management process and completed a real control run. Read the dated records in order: neither screenshots nor synthetic comparisons alone establish live VM health.
 
 Raw logs, databases, captures, and VM images are intentionally excluded from Git. Paths labeled **local evidence** describe files from the verification host and will not exist in a fresh clone. Published screenshots are in [images](images/README.md). The private local `DESIGN.md` is also excluded; public setup must not depend on it.

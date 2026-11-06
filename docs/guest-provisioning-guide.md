@@ -29,7 +29,7 @@ host_ip = "192.168.56.1" # example only: replace with the host-only adapter IP
 
 Use a baseline you have actually verified; the name `clean` alone proves nothing. The guest readiness example above is independent of the CLI workload timeout and is not a claim of successful startup. The committed default is 300 seconds; the November 6 frontend host used a 420-second local override. Do not copy verification-host UUIDs or addresses as your own configuration.
 
-Provision the HTTP agent and capture tools, confirm agent health and normal shutdown, and follow the candidate acceptance process below before treating a baseline as usable. Only one API, CLI, or harness should control the VM at a time. The [latest frontend check](frontend-verification.md) was blocked by VirtualBox state-query timeouts; the November 5 acceptance is historical evidence.
+Provision the HTTP agent and capture tools, confirm agent health and normal shutdown, and follow the candidate acceptance process below before treating a baseline as usable. Only one API, CLI, or harness should control the VM at a time. The [initial frontend check](frontend-verification.md) was blocked by VirtualBox state-query timeouts; a subsequent [console repair](console-launch-repair.md) completed a real control run. The November 5 acceptance remains historical evidence.
 
 Default paths:
 

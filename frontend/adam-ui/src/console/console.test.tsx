@@ -6,6 +6,7 @@ import { LaunchForm, SessionPage } from './pages';
 import { WorkspaceContext } from './context';
 import type { Sandbox, Summary } from './api';
 import { useSessionStream } from './hooks';
+import ConsoleApp from './ConsoleApp';
 
 const sandbox: Sandbox = { vm_state: 'Off', agent_healthy: false, current_snapshot: 'clean', vm_name: 'Windows', profile: 'Windows', busy: false, error: null, readiness_timeout_seconds: 420 };
 const response = (value: unknown, status = 200) => new Response(JSON.stringify(value), { status, headers: { 'Content-Type': 'application/json' } });
@@ -18,7 +19,7 @@ const summary: Summary = {
     error: 'Guest agent readiness timed out', failures: [{ stage: 'prepare', code: 'Timeout', description: 'Guest agent did not respond' }],
     source_outcomes: { sysmon: { enabled: true, events_count: 0, live_events_count: 0, errors: ['Source unavailable'] } },
   }, mode: 'live', counts: { events: 101, decisions: 0, mutations: 0 }, attck: [], indicators: [], indicators_truncated: false,
-  artifacts: [{ kind: 'raw', filename: 'raw.jsonl', size_bytes: 0, url: '/api/v1/sessions/sess_failed/artifacts/raw' }], comparison_available: false, provisional: false,
+  artifacts: [{ kind: 'raw', filename: 'raw.jsonl', size_bytes: 0, url: '/api/v1/sessions/sess_failed/artifacts/raw' }], comparison_available: false, provisional: false, phase: 'Finalizing',
 };
 
 function mockApi(liveStatus = 202) {
@@ -36,6 +37,28 @@ function mockApi(liveStatus = 202) {
 function renderLaunch() {
   return render(<MemoryRouter><WorkspaceContext.Provider value={{ sandbox, sandboxError: null, archive: null, archiveError: null, refresh: vi.fn() }}><Routes><Route path="/" element={<LaunchForm/>}/><Route path="/sessions/:id" element={<h1>Session opened</h1>}/></Routes></WorkspaceContext.Provider></MemoryRouter>);
 }
+
+describe('Sandbox status recovery', () => {
+  it('retries a failed management query and enables launch only after a valid response', async () => {
+    let unavailable = true;
+    const fetcher = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith('/sandbox/status')) return response({ ...sandbox, error: unavailable ? 'Management query timed out' : null });
+      if (url.endsWith('/samples')) return response({ samples: [{ id: 'smoke', filename: 'smoke_sample.exe', size_bytes: 2048, sha256: 'a'.repeat(64) }] });
+      return response({ items: [], total: 0, next_offset: null });
+    });
+    vi.stubGlobal('fetch', fetcher);
+    window.history.replaceState({}, '', '/');
+    render(<ConsoleApp/>);
+    await screen.findByRole('alert');
+    expect(screen.getByRole('button', { name: 'Launch analysis' })).toBeDisabled();
+    unavailable = false;
+    await userEvent.click(screen.getByRole('button', { name: 'Retry sandbox status' }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Launch analysis' })).toBeEnabled());
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(fetcher.mock.calls.some(([url]) => String(url).includes('/sessions/live'))).toBe(false);
+  });
+});
 
 describe('Real sample launch', () => {
   it('launches the allowlisted binary in control mode and navigates to its returned ID', async () => {
@@ -77,6 +100,7 @@ describe('Stored results', () => {
     render(<MemoryRouter initialEntries={['/sessions/sess_failed']}><Routes><Route path="/sessions/:id" element={<SessionPage/>}/></Routes></MemoryRouter>);
     expect(await screen.findByText('Guest agent readiness timed out')).toBeInTheDocument();
     expect(screen.getByText('Source unavailable')).toBeInTheDocument();
+    expect(screen.queryByText('Finalizing')).not.toBeInTheDocument();
     expect(screen.getByRole('link', { name: /raw.jsonl/ })).toHaveAttribute('href', '/api/v1/sessions/sess_failed/artifacts/raw');
     expect(screen.queryByRole('link', { name: /sysmon.evtx/ })).not.toBeInTheDocument();
     await userEvent.click(screen.getByRole('button', { name: 'Next page' }));

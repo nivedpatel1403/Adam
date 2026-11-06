@@ -17,6 +17,7 @@ from adam.contracts.session import AnalysisSession, SessionConfig, SessionMetric
 from adam.db.repositories.sqlite import SQLiteSessionRepository
 from adam.db.schema import SCHEMA_SQL
 from adam.orchestrator.runner import sample_ref_from_path
+from adam.sandbox.guest.http_models import GuestAgentUnreachableError
 
 
 @pytest.fixture
@@ -196,3 +197,35 @@ def test_stream_backpressure_requests_resync_without_blocking(monkeypatch):
     assert healthy.qsize() == 2
     console.broadcast("SemanticEvent", {"session_id": "other"})
     assert healthy.qsize() == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("failure", "message"), [
+    (GuestAgentUnreachableError("Agent still starting"), "TRANSPORT_ERROR: Agent still starting"),
+    (TimeoutError(), "Guest agent health check timed out"),
+])
+async def test_guest_boot_delay_does_not_hide_valid_virtualbox_state(console_client, monkeypatch, failure, message):
+    client, _root, _connection = console_client
+    vbox = SimpleNamespace(get_state=AsyncMock(return_value="running"),
+        list_snapshots=AsyncMock(return_value=[SimpleNamespace(name="clean", is_current=True)]))
+    monkeypatch.setattr(console, "VirtualBoxClient", lambda **_: vbox)
+    channel = SimpleNamespace(get_health=AsyncMock(side_effect=failure),
+        aclose=AsyncMock())
+    monkeypatch.setattr(console, "guest_channel", lambda _: channel)
+    status = (await client.get("/api/v1/sandbox/status")).json()
+    assert status["vm_state"] == "Running"
+    assert status["current_snapshot"] == "clean"
+    assert status["error"] is None
+    assert not status["agent_healthy"]
+    assert status["agent_error"] == message
+    channel.aclose.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_management_failure_remains_a_launch_blocker(console_client, monkeypatch):
+    client, _root, _connection = console_client
+    vbox = SimpleNamespace(get_state=AsyncMock(side_effect=RuntimeError("Management query timed out")))
+    monkeypatch.setattr(console, "VirtualBoxClient", lambda **_: vbox)
+    status = (await client.get("/api/v1/sandbox/status")).json()
+    assert status["vm_state"] == "unknown"
+    assert status["error"] == "Management query timed out"

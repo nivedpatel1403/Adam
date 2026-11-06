@@ -19,6 +19,7 @@ from adam.contracts.session import AnalysisSession, SessionConfig, SessionFailur
 from adam.orchestrator.runner import Runner, sample_ref_from_path
 from adam.orchestrator.session import new_session_id
 from adam.sandbox.guest.http_channel import HTTPGuestChannel
+from adam.sandbox.guest.http_models import GuestAgentError
 from adam.sandbox.shutdown import shutdown_normally
 from adam.sandbox.vbox.client import VirtualBoxClient
 
@@ -237,7 +238,7 @@ async def sandbox_status():
     settings = get_settings()
     result = {"vm_state": "unknown", "agent_healthy": False, "current_snapshot": "unknown",
               "vm_name": settings.sandbox.vm_name, "profile": settings.sandbox.vm_name,
-              "busy": operation_lock.locked(), "error": None,
+              "busy": operation_lock.locked(), "error": None, "agent_error": None,
               "readiness_timeout_seconds": settings.sandbox.guest_ready_timeout_s}
     client = VirtualBoxClient(default_command_timeout=5)
     try:
@@ -252,6 +253,10 @@ async def sandbox_status():
                 async with asyncio.timeout(3):
                     health = await channel.get_health()
                     result["agent_healthy"] = bool(health and health.status == "ok")
+            except (GuestAgentError, TimeoutError) as exc:
+                detail = str(exc).strip()
+                result["agent_error"] = detail.splitlines()[0] if detail else "Guest agent health check timed out"
+                logger.info("Guest agent not ready: %s", result["agent_error"])
             finally:
                 await channel.aclose()
     except Exception as exc:

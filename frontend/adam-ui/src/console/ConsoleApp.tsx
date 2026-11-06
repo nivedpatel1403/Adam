@@ -19,6 +19,7 @@ function Shell({ children }: { children: ReactNode }) {
   const [resetMessage, setResetMessage] = useState<string | null>(null);
   const refresh = () => { sandbox.refresh(); archive.refresh(); };
   const status = sandbox.data;
+  const statusError = sandbox.error || status?.error;
   const unavailable = !!sandbox.error || !status || !!status.error;
   const nav = [
     { to: '/', label: 'Console', icon: LayoutDashboard }, { to: '/sessions', label: 'Sessions', icon: FolderOpen },
@@ -37,9 +38,9 @@ function Shell({ children }: { children: ReactNode }) {
         </div>
       </aside>
       <div className="workspace">
-        <header className="status-ribbon" aria-label="System status"><div><span className={`lamp ${unavailable ? 'lamp-off' : ''}`} aria-hidden="true"/><strong>ADAM Console</strong><span className="ribbon-divider"/><span>{unavailable ? 'Status unavailable' : status.busy ? 'Analysis active' : 'Ready'}</span></div><div className="ribbon-details"><span>VM <b>{status?.vm_state || 'Unknown'}</b></span><span>Agent <b>{status?.vm_state === 'Off' ? 'Not running' : status?.agent_healthy ? 'Online' : 'Unreachable'}</b></span><span>Snapshot <b>{status?.current_snapshot || 'Unknown'}</b></span></div></header>
+        <header className="status-ribbon" aria-label="System status"><div><span className={`lamp ${unavailable ? 'lamp-off' : ''}`} aria-hidden="true"/><strong>ADAM Console</strong><span className="ribbon-divider"/><span>{unavailable ? 'Status unavailable' : status.busy ? 'Analysis active' : status.vm_state === 'Running' && !status.agent_healthy ? 'Agent unavailable' : 'Ready'}</span></div><div className="ribbon-details"><span>VM <b>{status?.vm_state || 'Unknown'}</b></span><span>Agent <b>{status?.vm_state === 'Off' ? 'Not running' : status?.agent_healthy ? 'Online' : status?.busy && status?.vm_state === 'Running' ? 'Not ready' : 'Unreachable'}</b></span><span>Snapshot <b>{status?.current_snapshot || 'Unknown'}</b></span></div></header>
         <main id="workspace-main" tabIndex={-1}>
-          {status?.error && <Notice error>Sandbox status: {status.error}</Notice>}
+          {statusError && <Notice error action={<Button compact aria-label="Retry sandbox status" onClick={sandbox.refresh}>Retry status</Button>}>Sandbox status: {statusError}. Check VirtualBox, then retry. The workload timeout controls sample execution, not this status check.</Notice>}
           {resetMessage && <Notice>{resetMessage}</Notice>}
           {children}
         </main>

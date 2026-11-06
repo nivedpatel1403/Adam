@@ -1,5 +1,7 @@
 # ADAM frontend implementation and verification
 
+> Initial frontend verification record. A later same-day [console launch repair](console-launch-repair.md) recovered the management process and completed a real UI-launched control run with correlated captures. The blocked outcome below remains preserved as historical evidence.
+
 Verified on 2026-11-06 on the local Windows verification host.
 Base revision: `94ad6530415bf607ddadd8011493ad3aecd2e52a`.
 The verified implementation was subsequently committed as `c284feb`. This is not a baseline-promotion acceptance record. Raw evidence paths below are local references, not downloads available in a fresh clone.
